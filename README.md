@@ -62,10 +62,29 @@ chegam entre o snapshot e a assinatura são perdidos e a tela fica furada.
 | `GET` | `/api/terminals/:id/claude-session` | sessão do Claude detectada + comando de resume |
 | `WS` | `/ws/:id` | liga ao PTY: replay do scrollback, depois ao vivo |
 
+## Armadilhas do Windows que já custaram tempo
+
+**`CreateProcessW` só executa binário.** O `claude` instalado pelo npm é um script
+(`claude`, `claude.cmd`, `claude.ps1` — nenhum é `.exe`), e o spawn direto falha com
+`%1 não é um aplicativo Win32 válido` (os error 193). Por isso comando que não termina
+em `.exe` passa pelo `%COMSPEC% /C`. Consequência conhecida: o filho do PTY vira o
+`cmd.exe`, então `DELETE` mata o `cmd` e pode deixar o processo neto órfão.
+
+**Assets do xterm.js são versionados aqui, não vêm de CDN.** O pacote virou
+`@xterm/xterm` (v6) e os caminhos antigos do cdnjs dão 404. Além disso, ferramenta
+local que depende de CDN não funciona offline — `web/vendor/` resolve os dois.
+
 ## Estado
 
-⚠️ **Esqueleto ainda não compilado** — escrito antes de o toolchain Rust existir na
-máquina. Os erros de compilação da primeira build entram num commit seguinte.
+✅ **Compila e roda.** Verificado ponta a ponta em 03/09/2026:
+
+- `cargo build` limpo (Rust 1.x, `stable-x86_64-pc-windows-msvc`)
+- Terminal de shell e terminal de Claude subindo no mesmo workspace
+- Claude Code renderizando com cores ANSI dentro do PTY, no browser
+- Entrada de teclado chegando no processo pelo WebSocket
+- Troca de terminal pela sidebar, com o ativo destacado
+- **A aba do browser foi fechada por completo e reaberta: os dois processos
+  continuaram vivos e o scrollback foi reproduzido inteiro** — a promessa central
 
 Fora do recorte por decisão, não por esquecimento:
 

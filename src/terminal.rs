@@ -60,13 +60,7 @@ impl Terminal {
             pixel_height: 0,
         })?;
 
-        // O comando chega como linha única; o primeiro token é o executável.
-        let mut parts = command.split_whitespace();
-        let program = parts.next().ok_or_else(|| anyhow!("comando vazio"))?;
-        let mut builder = CommandBuilder::new(program);
-        for arg in parts {
-            builder.arg(arg);
-        }
+        let mut builder = build_command(&command)?;
         builder.cwd(&cwd);
 
         let child = pair.slave.spawn_command(builder)?;
@@ -181,6 +175,33 @@ impl Terminal {
             alive: self.is_alive(),
         }
     }
+}
+
+/// Monta o `CommandBuilder` a partir da linha de comando.
+///
+/// No Windows o `CreateProcessW` só executa binário de verdade. Os atalhos que o
+/// npm instala (`claude`, `claude.cmd`) e qualquer `.bat`/`.cmd` são script, e
+/// falham com "não é um aplicativo Win32 válido" (os error 193). Para esses, quem
+/// executa de fato é o interpretador de comandos.
+fn build_command(command: &str) -> Result<CommandBuilder> {
+    let mut parts = command.split_whitespace();
+    let program = parts.next().ok_or_else(|| anyhow!("comando vazio"))?;
+
+    let is_native_binary = program.to_ascii_lowercase().ends_with(".exe");
+    if cfg!(windows) && !is_native_binary {
+        let interpreter = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+        let mut builder = CommandBuilder::new(interpreter);
+        builder.arg("/C");
+        // A linha inteira vai como um argumento só — é a forma que o `/C` espera.
+        builder.arg(command);
+        return Ok(builder);
+    }
+
+    let mut builder = CommandBuilder::new(program);
+    for arg in parts {
+        builder.arg(arg);
+    }
+    Ok(builder)
 }
 
 /// Os terminais do workspace, em ordem de criação — a ordem da sidebar.
