@@ -1,3 +1,8 @@
+// Sem console no Windows: clicar no atalho do menu Iniciar não pode abrir uma
+// janela preta de terminal. O Deck é um programa, não um serviço de linha de
+// comando — quem quiser as mensagens roda pelo terminal, que aí elas aparecem.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod claude;
 mod terminal;
 mod update;
@@ -97,8 +102,70 @@ struct TerminalSession {
     usage: Option<SessionUsage>,
 }
 
+/// Abre a interface numa janela própria.
+///
+/// Sem Tauri ainda, o mais próximo de janela nativa é o modo aplicativo do
+/// navegador: sem barra de endereço, sem abas, com ícone e entrada próprios na
+/// barra de tarefas. Se nenhum navegador conhecido existir, cai no padrão do
+/// sistema, que abre numa aba comum.
+fn open_window(address: &str) {
+    let url = format!("http://{address}");
+
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+
+        const APP_BROWSERS: [&str; 3] = [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ];
+
+        for browser in APP_BROWSERS {
+            if std::path::Path::new(browser).exists() {
+                if Command::new(browser)
+                    .arg(format!("--app={url}"))
+                    .spawn()
+                    .is_ok()
+                {
+                    return;
+                }
+            }
+        }
+        // Último recurso: quem abre é o sistema, numa aba comum.
+        let _ = Command::new("cmd").args(["/C", "start", "", &url]).spawn();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(&url).spawn();
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+    }
+}
+
+/// Já existe um Deck rodando nesta máquina?
+///
+/// Clicar duas vezes no atalho não pode dar erro de porta ocupada: se o daemon
+/// já está de pé, a segunda execução só traz a janela de volta e sai.
+fn already_running(address: &str) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &address.parse().expect("endereço de escuta inválido"),
+        std::time::Duration::from_millis(300),
+    )
+    .is_ok()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if already_running(LISTEN_ADDRESS) {
+        open_window(LISTEN_ADDRESS);
+        return Ok(());
+    }
+
     let registry = Arc::new(Registry::default());
 
     let app = Router::new()
@@ -124,7 +191,12 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(LISTEN_ADDRESS).await?;
     println!("Synapse Deck no ar em http://{LISTEN_ADDRESS}");
-    println!("os terminais sobrevivem ao fechar o browser — feche a janela e volte");
+    println!("os terminais sobrevivem ao fechar a janela — feche e volte");
+
+    // A janela sobe depois que a porta já aceita conexão, senão ela abre antes
+    // do servidor responder e mostra erro no primeiro carregamento.
+    open_window(LISTEN_ADDRESS);
+
     axum::serve(listener, app).await?;
     Ok(())
 }

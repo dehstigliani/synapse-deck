@@ -3,6 +3,20 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [1.0.0-alpha.5] — 2026-09-03
+
+### Corrigido
+
+- **Não era um programa desktop.** Clicar no atalho abria uma janela preta de
+  terminal e nada mais: era preciso abrir o navegador e digitar o endereço na mão.
+  Agora o Deck sobe sem console e **abre a própria janela**, em modo aplicativo —
+  sem barra de endereço nem abas, com entrada própria na barra de tarefas.
+- **Clicar duas vezes no atalho dava erro de porta ocupada.** A segunda execução
+  agora apenas traz a janela de volta e encerra.
+- A página do release passa a dizer **qual arquivo baixar**: havia dois `.exe` no
+  Windows — o instalador e o binário que o atualizador consome — sem nada
+  distinguindo um do outro.
+
 ## [1.0.0-alpha.4] — 2026-09-03
 
 ### Adicionado

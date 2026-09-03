@@ -134,8 +134,31 @@ jobs:
           # Qualquer coisa com hífen na versão (alpha, beta, rc) entra como pré-lançamento.
           prerelease=""
           case "$version" in *-*) prerelease="--prerelease" ;; esac
+          # O release traz dois .exe no Windows: o instalador e o binario solto
+          # que o atualizador embutido baixa. Sem esta nota e facil baixar o
+          # errado, entao ela vai no topo, antes do changelog.
+          {
+            echo "## Instalar"
+            echo
+            echo "| Sistema | Baixe |"
+            echo "|---|---|"
+            echo "| **Windows** | \`synapse-deck-setup-$version.exe\` — o instalador |"
+            echo "| **macOS (Apple Silicon)** | \`synapse-deck-macos-arm64.tar.gz\` |"
+            echo "| **Linux (x86_64)** | \`synapse-deck-linux-x86_64.tar.gz\` |"
+            echo
+            echo "Os arquivos \`synapse-deck-<sistema>\` soltos **nao sao para baixar a mao**:"
+            echo "sao o que o atualizador dentro do programa consome."
+            echo
+            echo "> Os binarios nao sao assinados. O SmartScreen do Windows avisa na primeira"
+            echo "> execucao (Mais informacoes / Executar assim mesmo), e o macOS nao esta notarizado."
+            echo
+            echo "---"
+            echo
+            cat CHANGELOG.md
+          } > notas-do-release.md
+
           gh release create "$GITHUB_REF_NAME" \
             --title "Synapse Deck $version" \
-            --notes-file CHANGELOG.md \
+            --notes-file notas-do-release.md \
             $prerelease \
             artifacts/*
