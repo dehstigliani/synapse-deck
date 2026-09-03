@@ -23,6 +23,14 @@ consumo por janela deslizante, o que dava número errado.
   arrastar consumo velho.
 - **Identidade visual**: logo como marca na sidebar e favicon.
 - **Nome de pasta escolhido por você**, em campo na própria sidebar.
+- **Instalador para Windows** (Inno Setup): menu Iniciar, atalho opcional na área
+  de trabalho, desinstalador e entrada em Programas e Recursos. Instala por
+  usuário, sem pedir elevação.
+- **Atualização dentro do programa**: o Deck consulta o GitHub Releases, avisa na
+  barra quando há versão nova e instala com um clique. A troca **não reinicia** o
+  Deck — reiniciar mataria os terminais abertos; a versão nova vale na próxima
+  abertura. ⚠️ Enquanto o repositório for privado, isso exige um token em
+  `SYNAPSE_DECK_GITHUB_TOKEN`.
 
 ### Limitação desta medição
 

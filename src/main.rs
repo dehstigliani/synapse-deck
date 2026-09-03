@@ -1,5 +1,6 @@
 mod claude;
 mod terminal;
+mod update;
 
 use axum::{
     extract::{
@@ -110,12 +111,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/groups", get(list_groups))
         .route("/api/usage", get(usage_report))
         .route("/api/usage/pulse", get(usage_pulse))
+        .route("/api/update", get(check_update).post(apply_update))
         .route("/api/sessions/by-boot", get(sessions_by_boot))
         .route("/api/sessions/active", get(active_sessions))
         .route("/api/sessions", get(list_sessions))
         .route("/ws/:id", get(attach_terminal))
         .fallback(serve_asset)
         .with_state(registry);
+
+    // Limpa o binário antigo deixado por uma atualização anterior.
+    update::clean_previous();
 
     let listener = tokio::net::TcpListener::bind(LISTEN_ADDRESS).await?;
     println!("Synapse Deck no ar em http://{LISTEN_ADDRESS}");
@@ -158,6 +163,36 @@ async fn list_sessions(Query(query): Query<CwdQuery>) -> Json<Vec<SessionSummary
 /// Consumo agregado de todos os projetos: totais, por dia e por projeto.
 async fn usage_report(Query(query): Query<UsageQuery>) -> Json<claude::UsageReport> {
     Json(claude::usage_report(query.days.unwrap_or(14)))
+}
+
+/// Ha versao nova publicada?
+///
+/// A consulta sai numa thread de bloqueio: `ureq` e sincrono e travaria o
+/// executor async se rodasse direto no handler.
+async fn check_update() -> Json<update::UpdateStatus> {
+    Json(
+        tokio::task::spawn_blocking(update::check)
+            .await
+            .unwrap_or_default(),
+    )
+}
+
+/// Baixa a versao nova e troca o executavel.
+///
+/// Nao reinicia o programa: reiniciar mataria todos os terminais abertos. A
+/// versao nova vale a partir da proxima inicializacao.
+async fn apply_update() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let result = tokio::task::spawn_blocking(update::apply)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+
+    match result {
+        Ok(path) => Ok(Json(serde_json::json!({
+            "installed_at": path.to_string_lossy(),
+            "message": "Atualizado. A versão nova vale na próxima vez que o Deck abrir —                         os terminais em uso continuam intactos até lá.",
+        }))),
+        Err(error) => Err((StatusCode::BAD_GATEWAY, error.to_string())),
+    }
 }
 
 /// Quanto foi consumido na ultima hora, na janela de 5h e na semana.

@@ -167,6 +167,23 @@
   }
   .topbar button.ghost:hover { color: var(--text); border-color: var(--accent); }
 
+  /* aviso de versão nova */
+  .update {
+    display: none;
+    align-items: center;
+    gap: 7px;
+    padding: 3px 9px;
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    color: var(--accent);
+    cursor: pointer;
+    background: none;
+  }
+  .update.show { display: inline-flex; }
+  .update:hover { background: var(--accent-soft); }
+  .update .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+  .update[disabled] { opacity: .6; cursor: default; }
+
   /* pulso de consumo na navbar */
   .pulse { display: flex; align-items: center; gap: 7px; }
   .pulse .label { color: var(--muted); }
@@ -306,6 +323,10 @@
       <span class="name" id="active-name">—</span>
       <span class="cwd" id="active-cwd"></span>
       <span class="spacer"></span>
+      <button class="update" id="update">
+        <span class="dot"></span>
+        <span id="update-label">versão nova</span>
+      </button>
       <span class="pulse" id="pulse" hidden>
         <span class="label">5h</span>
         <span class="bar"><span class="fill" id="pulse-5h-fill"></span></span>
@@ -711,6 +732,52 @@ async function activate(id) {
 
 const activeTerminal = () => terminals.find((item) => item.id === activeId);
 
+// ---------------------------------------------------------------- atualização
+/// Avisa quando há versão nova publicada e instala sem sair do programa.
+///
+/// A troca **não reinicia** o Deck: reiniciar mataria todos os terminais
+/// abertos. O binário novo passa a valer na próxima vez que o programa abrir.
+async function checkUpdate() {
+  const button = document.getElementById('update');
+  const label = document.getElementById('update-label');
+
+  let status;
+  try {
+    status = await api('/update');
+  } catch {
+    return; // sem rede: o aviso simplesmente não aparece
+  }
+
+  if (status.error) {
+    // Falha de verificação não vira alarme na barra — fica só no console.
+    console.info('[synapse-deck] não deu para verificar atualização:', status.error);
+    return;
+  }
+  if (!status.available) return;
+
+  label.textContent = `versão ${status.latest}`;
+  button.title =
+    `Você está na ${status.current}. A ${status.latest} já foi publicada.\n\n` +
+    `Clique para baixar e instalar. Os terminais abertos não são afetados: ` +
+    `a versão nova passa a valer quando o Deck for aberto de novo.\n\n` +
+    (status.notes || '');
+  button.classList.add('show');
+
+  button.onclick = async () => {
+    button.disabled = true;
+    label.textContent = 'baixando…';
+    try {
+      const done = await api('/update', { method: 'POST' });
+      label.textContent = 'instalada · reabra o Deck';
+      button.title = done.message;
+    } catch (error) {
+      label.textContent = 'falhou';
+      button.title = String(error.message || error);
+      button.disabled = false;
+    }
+  };
+}
+
 // ---------------------------------------------------------------- pulso
 /// Quanto tempo falta, em linguagem de relógio.
 const formatCountdown = (seconds) => {
@@ -1019,6 +1086,10 @@ window.addEventListener('resize', () => {
 setInterval(() => refresh().catch(() => {}), 4000);
 updatePulse().catch(() => {});
 setInterval(() => updatePulse().catch(() => {}), 60000);
+
+// Verifica versão nova ao abrir e a cada hora — não precisa ser mais que isso.
+checkUpdate().catch(() => {});
+setInterval(() => checkUpdate().catch(() => {}), 3600000);
 refresh().catch((error) => {
   placeholderEl.textContent = `daemon não respondeu: ${error.message}`;
 });

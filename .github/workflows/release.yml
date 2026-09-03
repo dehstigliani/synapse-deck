@@ -57,27 +57,59 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $dir = "synapse-deck-${{ matrix.label }}"
-          New-Item -ItemType Directory $dir | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" $dir
-          Copy-Item README.md, CHANGELOG.md, LICENSE $dir
-          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          $name = "synapse-deck-${{ matrix.label }}"
+          # A pasta de montagem tem nome próprio: se ela se chamasse como o
+          # asset, o binário solto cairia dentro dela em vez de virar arquivo.
+          New-Item -ItemType Directory dist/$name -Force | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/$name
+          Copy-Item README.md, CHANGELOG.md, LICENSE dist/$name
+          Compress-Archive -Path dist/$name -DestinationPath "$name.zip"
+          # O binário solto é o que o atualizador embutido baixa: sem ele,
+          # atualizar exigiria uma dependência de descompactação.
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$name.exe"
 
       - name: empacota (unix)
         if: runner.os != 'Windows'
         run: |
-          dir="synapse-deck-${{ matrix.label }}"
-          mkdir "$dir"
-          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$dir/"
-          cp README.md CHANGELOG.md LICENSE "$dir/"
-          tar -czf "$dir.tar.gz" "$dir"
+          name="synapse-deck-${{ matrix.label }}"
+          # A pasta de montagem fica sob dist/ pelo mesmo motivo do Windows.
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/$name/"
+          cp README.md CHANGELOG.md LICENSE "dist/$name/"
+          tar -czf "$name.tar.gz" -C dist "$name"
+          # O binário solto é o que o atualizador embutido baixa.
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$name"
+
+      # Instalador de verdade para Windows: menu Iniciar, desinstalador e
+      # entrada em Programas e Recursos. Inno em vez de MSI porque o MSI exige
+      # versão numérica de três partes e recusaria "1.0.0-alpha.2".
+      - name: instalador (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $binary = (Resolve-Path "target/${{ matrix.target }}/release/${{ matrix.binary }}").Path
+          # ${env:ProgramFiles(x86)} com chaves: sem elas o PowerShell trata os
+          # parênteses como chamada e a variável não expande.
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe nao encontrado em $iscc" }
+          & $iscc /DAppVersion=$version /DBinary=$binary `
+            /O"$PWD" /F"synapse-deck-setup-$version" `
+            packaging/windows/synapse-deck.iss
+          Get-ChildItem synapse-deck-setup-*.exe | ForEach-Object {
+            "gerado: $($_.Name) ($([math]::Round($_.Length/1MB,2)) MB)"
+          }
 
       - uses: actions/upload-artifact@v4
         with:
           name: synapse-deck-${{ matrix.label }}
           path: |
-            synapse-deck-*.zip
-            synapse-deck-*.tar.gz
+            synapse-deck-${{ matrix.label }}.zip
+            synapse-deck-${{ matrix.label }}.tar.gz
+            synapse-deck-${{ matrix.label }}.exe
+            synapse-deck-${{ matrix.label }}
+            synapse-deck-setup-*.exe
           if-no-files-found: error
 
   publish:
