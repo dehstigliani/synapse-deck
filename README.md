@@ -3,12 +3,6 @@
 **O deck de terminais e agentes.** Vários terminais nomeados, cada um num PTY de
 verdade, com o Claude Code rodando dentro e sobrevivendo ao fechar da janela.
 
-Projeto pessoal. Zona 🎓 **escola** — o retorno é aprender Rust e a camada de PTY.
-Não é produto e não tem receita prevista.
-
-> O nome é de protótipo e deve ser renomeado. Renomear no GitHub mantém redirect do
-> nome antigo; só é preciso rodar `git remote set-url` no clone depois.
-
 ## O que faz
 
 - Vários terminais simultâneos, cada um num PTY de verdade

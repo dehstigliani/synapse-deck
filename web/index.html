@@ -306,6 +306,7 @@
         <span class="value" id="pulse-hour">—</span>
         <span class="sep">|</span>
         <span class="label">semana</span>
+        <span class="bar"><span class="fill" id="pulse-week-fill"></span></span>
         <span class="value" id="pulse-week">—</span>
       </span>
       <span class="meter" id="meter" hidden>
@@ -712,17 +713,20 @@ async function updatePulse() {
   const box = document.getElementById('pulse');
   document.getElementById('pulse-hour').textContent =
     `${formatTokens(pulse.tokens_last_hour)} · ${pulse.hour_percent.toFixed(0)}%`;
-  document.getElementById('pulse-week').textContent = formatTokens(pulse.tokens_last_week);
+  document.getElementById('pulse-week').textContent =
+    `${formatTokens(pulse.tokens_last_week)} · ${pulse.week_percent.toFixed(0)}%`;
 
-  const fill = document.getElementById('pulse-fill');
-  fill.style.width = `${Math.min(pulse.hour_percent, 100)}%`;
+  document.getElementById('pulse-fill').style.width = `${Math.min(pulse.hour_percent, 100)}%`;
+  document.getElementById('pulse-week-fill').style.width = `${Math.min(pulse.week_percent, 100)}%`;
 
   box.title =
     `última hora: ${formatTokens(pulse.tokens_last_hour)} tokens\n` +
-    `janela de 5h: ${formatTokens(pulse.tokens_last_5h)}\n` +
-    `últimos 7 dias: ${formatTokens(pulse.tokens_last_week)}\n` +
-    `hora mais cheia já registrada: ${formatTokens(pulse.peak_hour_tokens)}\n\n` +
-    `A % compara com o seu próprio pico, não com a cota do plano — ` +
+    `janela de 5h: ${formatTokens(pulse.tokens_last_5h)} · ${pulse.five_hour_percent.toFixed(0)}%\n` +
+    `últimos 7 dias: ${formatTokens(pulse.tokens_last_week)} · ${pulse.week_percent.toFixed(0)}%\n\n` +
+    `picos já registrados — hora ${formatTokens(pulse.peak_hour_tokens)}, ` +
+    `5h ${formatTokens(pulse.peak_5h_tokens)}, ` +
+    `semana ${formatTokens(pulse.peak_week_tokens)}\n\n` +
+    `As % comparam com o seu próprio pico, não com a cota do plano — ` +
     `o limite do plano não está nos arquivos locais.`;
   box.hidden = false;
 }

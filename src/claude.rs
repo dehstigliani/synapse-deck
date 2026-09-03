@@ -751,12 +751,43 @@ pub struct UsagePulse {
     /// A janela de 5 horas é o ciclo de limite das assinaturas.
     pub tokens_last_5h: u64,
     pub tokens_last_week: u64,
-    /// A hora mais cheia já registrada — é o denominador honesto que temos.
+    /// Os picos já registrados, que servem de denominador para as porcentagens.
     ///
-    /// ⚠️ Não é a cota do plano: esse número não existe em disco. A porcentagem
-    /// compara o ritmo de agora com o pico do próprio usuário.
+    /// ⚠️ Nenhum deles é a cota do plano — esse número não existe em disco. As
+    /// porcentagens comparam o ritmo de agora com o pico do próprio usuário.
     pub peak_hour_tokens: u64,
+    pub peak_5h_tokens: u64,
+    pub peak_week_tokens: u64,
     pub hour_percent: f64,
+    pub five_hour_percent: f64,
+    pub week_percent: f64,
+}
+
+/// Maior soma de uma janela deslizante sobre uma série ordenada de baldes.
+///
+/// Os baldes vazios contam como zero: uma pausa no meio da janela não pode
+/// inflar o pico juntando dois picos separados por dias de silêncio.
+fn peak_window(buckets: &HashMap<u64, u64>, bucket_size: u64, window: u64) -> u64 {
+    if buckets.is_empty() {
+        return 0;
+    }
+    let mut ordered: Vec<(u64, u64)> = buckets.iter().map(|(at, n)| (*at, *n)).collect();
+    ordered.sort_by_key(|(at, _)| *at);
+
+    let mut peak = 0u64;
+    let mut start = 0usize;
+    let mut running = 0u64;
+    for index in 0..ordered.len() {
+        running += ordered[index].1;
+        // Encolhe pela esquerda enquanto a janela for maior que o permitido.
+        while ordered[index].0.saturating_sub(ordered[start].0) >= window {
+            running -= ordered[start].1;
+            start += 1;
+        }
+        let _ = bucket_size;
+        peak = peak.max(running);
+    }
+    peak
 }
 
 pub fn usage_pulse() -> UsagePulse {
@@ -793,10 +824,19 @@ pub fn usage_pulse() -> UsagePulse {
         pulse.peak_hour_tokens = pulse.peak_hour_tokens.max(*tokens);
     }
 
-    if pulse.peak_hour_tokens > 0 {
-        pulse.hour_percent =
-            (pulse.tokens_last_hour as f64 / pulse.peak_hour_tokens as f64 * 100.0).min(100.0);
-    }
+    pulse.peak_5h_tokens = peak_window(&totals_by_hour, 3_600, 5 * 3_600);
+    pulse.peak_week_tokens = peak_window(&totals_by_hour, 3_600, 7 * 86_400);
+
+    let ratio = |part: u64, whole: u64| {
+        if whole == 0 {
+            0.0
+        } else {
+            (part as f64 / whole as f64 * 100.0).min(100.0)
+        }
+    };
+    pulse.hour_percent = ratio(pulse.tokens_last_hour, pulse.peak_hour_tokens);
+    pulse.five_hour_percent = ratio(pulse.tokens_last_5h, pulse.peak_5h_tokens);
+    pulse.week_percent = ratio(pulse.tokens_last_week, pulse.peak_week_tokens);
     pulse
 }
 
@@ -875,6 +915,20 @@ mod tests {
         assert_eq!(usage.context_tokens, 10 + 300_000 + 100);
         // Passou de 200k, logo a janela só pode ser a estendida.
         assert_eq!(usage.context_limit, EXTENDED_CONTEXT_LIMIT);
+    }
+
+    #[test]
+    fn peak_window_ignores_gaps() {
+        let mut buckets = HashMap::new();
+        // Dois picos de 100 separados por 10 horas não podem virar um de 200.
+        buckets.insert(0u64, 100u64);
+        buckets.insert(36_000u64, 100u64);
+        // Duas horas seguidas somam de verdade.
+        buckets.insert(72_000u64, 30u64);
+        buckets.insert(75_600u64, 40u64);
+        assert_eq!(peak_window(&buckets, 3_600, 5 * 3_600), 100);
+        assert_eq!(peak_window(&buckets, 3_600, 7 * 86_400), 270);
+        assert_eq!(peak_window(&HashMap::new(), 3_600, 3_600), 0);
     }
 
     #[test]
