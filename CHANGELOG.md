@@ -3,6 +3,33 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [1.0.0-alpha.2] — 2026-09-03
+
+Primeira versão publicada de verdade. A `alpha.1` foi retirada: ela calculava o
+consumo por janela deslizante, o que dava número errado.
+
+### Corrigido
+
+- **Janelas de limite estavam erradas.** Eram medidas como "as últimas 5h a partir
+  de agora", mas o limite não desliza com o relógio: a janela começa na sua
+  primeira mensagem e vale 5h a partir dali. A semana chegou a marcar 78% somando
+  sete dias corridos para trás, atravessando ciclos já resetados; o ciclo real
+  estava em 23%.
+
+### Adicionado
+
+- **Contador de reset** por janela — quanto falta para o ciclo de 5h e o de 7 dias
+  renovarem, com o momento exato no tooltip. Janela vencida mostra zero em vez de
+  arrastar consumo velho.
+- **Identidade visual**: logo como marca na sidebar e favicon.
+- **Nome de pasta escolhido por você**, em campo na própria sidebar.
+
+### Limitação desta medição
+
+O início do ciclo é **inferido do histórico local de mensagens**. O relógio real
+do limite fica no servidor do provedor e não está nos arquivos — uso em outra
+máquina pode divergir dessa âncora.
+
 ## [1.0.0-alpha.1] — 2026-09-03
 
 Primeira versão pública. **Alpha:** roda e faz o que promete, mas a superfície
