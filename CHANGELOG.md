@@ -3,6 +3,18 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [1.0.0-alpha.3] — 2026-09-03
+
+### Corrigido
+
+- **A verificação de atualização não achava nada.** `/releases/latest` do GitHub
+  ignora pré-lançamento e devolve 404 quando só existem alphas — inclusive com
+  token válido. Agora a busca é na lista de releases e a escolha sai da comparação
+  de versão, não da ordem da API. O download também: usava a URL
+  `releases/latest/download/`, que tinha o mesmo defeito.
+- Em repositório privado o binário passa a ser baixado pelo endpoint da API com
+  `Accept: application/octet-stream`, porque o link público não aceita token.
+
 ## [1.0.0-alpha.2] — 2026-09-03
 
 Primeira versão publicada de verdade. A `alpha.1` foi retirada: ela calculava o

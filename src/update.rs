@@ -107,6 +107,56 @@ pub fn compare_versions(left: &str, right: &str) -> Ordering {
     }
 }
 
+/// Descobre o release mais novo, **incluindo pré-lançamentos**.
+///
+/// ⚠️ `/releases/latest` do GitHub ignora pré-lançamento e devolve 404 quando só
+/// existem alphas — foi exatamente o que aconteceu aqui. Por isso a busca é na
+/// lista e a escolha é por comparação de versão, não pela ordem da API.
+fn newest_release() -> Result<Value> {
+    let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=20");
+    let releases: Value = request(&url)
+        .call()
+        .map_err(|error| match error {
+            ureq::Error::Status(404, _) => anyhow!(
+                "repositório ou releases inacessíveis — se for privado, defina \
+                 SYNAPSE_DECK_GITHUB_TOKEN"
+            ),
+            ureq::Error::Status(401 | 403, _) => anyhow!(
+                "acesso negado ao repositório — defina SYNAPSE_DECK_GITHUB_TOKEN \
+                 com um token que enxergue este repositório"
+            ),
+            other => anyhow!(other.to_string()),
+        })?
+        .into_json()
+        .context("resposta ilegível do GitHub")?;
+
+    let mut best: Option<(String, Value)> = None;
+    for release in releases.as_array().cloned().unwrap_or_default() {
+        if release.get("draft").and_then(Value::as_bool).unwrap_or(false) {
+            continue;
+        }
+        let tag = release
+            .get("tag_name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim_start_matches('v')
+            .to_string();
+        if tag.is_empty() {
+            continue;
+        }
+        let melhor = match &best {
+            Some((atual, _)) => compare_versions(&tag, atual) == Ordering::Greater,
+            None => true,
+        };
+        if melhor {
+            best = Some((tag, release));
+        }
+    }
+
+    best.map(|(_, release)| release)
+        .ok_or_else(|| anyhow!("nenhum release publicado"))
+}
+
 /// Consulta o release mais recente. Nunca falha: o erro vira campo da resposta.
 pub fn check() -> UpdateStatus {
     let mut status = UpdateStatus {
@@ -114,23 +164,8 @@ pub fn check() -> UpdateStatus {
         ..Default::default()
     };
 
-    let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let release: Value = match request(&url).call() {
-        Ok(response) => match response.into_json() {
-            Ok(json) => json,
-            Err(error) => {
-                status.error = Some(format!("resposta ilegível: {error}"));
-                return status;
-            }
-        },
-        Err(ureq::Error::Status(404, _)) => {
-            status.error = Some(
-                "release não encontrado — se o repositório for privado, defina \
-                 SYNAPSE_DECK_GITHUB_TOKEN"
-                    .to_string(),
-            );
-            return status;
-        }
+    let release = match newest_release() {
+        Ok(release) => release,
         Err(error) => {
             status.error = Some(error.to_string());
             return status;
@@ -166,14 +201,41 @@ pub fn check() -> UpdateStatus {
 /// A troca **não reinicia** o programa: reiniciar mataria todos os terminais
 /// abertos. A versão nova entra na próxima inicialização.
 pub fn apply() -> Result<PathBuf> {
-    let url = format!(
-        "https://github.com/{REPO}/releases/latest/download/{}",
-        asset_name()
-    );
+    let release = newest_release()?;
+    let wanted = asset_name();
 
-    let response = request(&url)
-        .call()
-        .with_context(|| format!("falha ao baixar {url}"))?;
+    let asset = release
+        .get("assets")
+        .and_then(Value::as_array)
+        .and_then(|assets| {
+            assets
+                .iter()
+                .find(|asset| asset.get("name").and_then(Value::as_str) == Some(wanted))
+        })
+        .ok_or_else(|| anyhow!("o release não traz o binário {wanted}"))?;
+
+    // Em repositório privado o link público não serve: baixa-se pelo endpoint da
+    // API, que aceita o token, pedindo o conteúdo bruto em vez do JSON do asset.
+    let has_token = std::env::var("SYNAPSE_DECK_GITHUB_TOKEN")
+        .map(|token| !token.trim().is_empty())
+        .unwrap_or(false);
+
+    let response = if has_token {
+        let api_url = asset
+            .get("url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("asset sem url de API"))?;
+        request(api_url)
+            .set("Accept", "application/octet-stream")
+            .call()
+    } else {
+        let public_url = asset
+            .get("browser_download_url")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("asset sem url de download"))?;
+        request(public_url).call()
+    }
+    .context("falha ao baixar o binário novo")?;
 
     let mut bytes = Vec::new();
     std::io::copy(&mut response.into_reader(), &mut bytes).context("falha ao ler o download")?;
