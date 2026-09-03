@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PTY Terminal Workspace</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css" />
+<style>
+  :root {
+    --bg: #0f1115;
+    --sidebar: #15181f;
+    --border: #242938;
+    --text: #d7dbe4;
+    --muted: #737b8f;
+    --accent: #ff7a2f;
+    --alive: #35c07f;
+    --dead: #5a6070;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    height: 100vh;
+    display: grid;
+    grid-template-columns: 248px 1fr;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.5 ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  }
+
+  /* ---- sidebar ---- */
+  aside {
+    background: var(--sidebar);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .brand {
+    padding: 14px 16px 10px;
+    font-size: 11px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+  }
+  .list { flex: 1; overflow-y: auto; padding: 8px 8px 16px; }
+
+  .item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 9px;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--text);
+  }
+  .item:hover { background: #1c2130; }
+  .item.active { background: #232a3c; box-shadow: inset 2px 0 0 var(--accent); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--alive); flex: none; }
+  .dot.dead { background: var(--dead); }
+  .item .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .kill {
+    opacity: 0;
+    border: 0;
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0 2px;
+  }
+  .item:hover .kill { opacity: 1; }
+  .item .kill:hover { color: #ff6b6b; }
+  .item input {
+    flex: 1;
+    background: #0f1115;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    color: var(--text);
+    font: inherit;
+    padding: 2px 5px;
+  }
+
+  .empty { color: var(--muted); padding: 12px 10px; font-size: 12px; }
+
+  .actions { padding: 10px; border-top: 1px solid var(--border); display: flex; gap: 6px; }
+  .actions button {
+    flex: 1;
+    padding: 7px 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #1a1f2c;
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .actions button:hover { border-color: var(--accent); color: #fff; }
+
+  /* ---- painel do terminal ---- */
+  main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 12px;
+    min-height: 38px;
+  }
+  .topbar .name { color: var(--text); }
+  .topbar .session { margin-left: auto; }
+  .topbar code {
+    background: #1a1f2c;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 6px;
+    color: var(--accent);
+    cursor: pointer;
+  }
+  .screens { flex: 1; position: relative; min-height: 0; }
+  .screen { position: absolute; inset: 0; padding: 6px 0 0 8px; display: none; }
+  .screen.active { display: block; }
+  .placeholder {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-content: center;
+    color: var(--muted);
+    text-align: center;
+    line-height: 2;
+  }
+</style>
+</head>
+<body>
+  <aside>
+    <div class="brand">Terminais</div>
+    <div class="list" id="list"><div class="empty">nenhum terminal ainda</div></div>
+    <div class="actions">
+      <button id="new-claude">+ Claude</button>
+      <button id="new-shell">+ Shell</button>
+    </div>
+  </aside>
+
+  <main>
+    <div class="topbar">
+      <span class="name" id="active-name">—</span>
+      <span id="active-cwd"></span>
+      <span class="session" id="active-session"></span>
+    </div>
+    <div class="screens" id="screens">
+      <div class="placeholder" id="placeholder">
+        Crie um terminal na barra ao lado.<br />
+        Os processos vivem no daemon: fechar esta janela não mata a sessão.
+      </div>
+    </div>
+  </main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm-addon-fit/0.8.0/xterm-addon-fit.min.js"></script>
+<script>
+// Cada terminal aberto tem uma instância de xterm e um WebSocket próprios,
+// mantidos vivos ao trocar de aba para não perder o fluxo de saída.
+const panes = new Map();
+let activeId = null;
+
+const listEl = document.getElementById('list');
+const screensEl = document.getElementById('screens');
+const placeholderEl = document.getElementById('placeholder');
+
+const theme = {
+  background: '#0f1115',
+  foreground: '#d7dbe4',
+  cursor: '#ff7a2f',
+  selectionBackground: '#2d3446',
+};
+
+async function api(path, options) {
+  const response = await fetch(`/api${path}`, {
+    headers: { 'content-type': 'application/json' },
+    ...options,
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.status === 204 ? null : response.json();
+}
+
+async function refresh() {
+  const terminals = await api('/terminals');
+  renderSidebar(terminals);
+  if (activeId && !terminals.some((item) => item.id === activeId)) activeId = null;
+  if (!activeId && terminals.length) activate(terminals[0].id);
+  updateTopbar(terminals.find((item) => item.id === activeId));
+}
+
+function renderSidebar(terminals) {
+  listEl.textContent = '';
+  if (!terminals.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'nenhum terminal ainda';
+    listEl.append(empty);
+    return;
+  }
+
+  for (const item of terminals) {
+    const row = document.createElement('div');
+    row.className = 'item' + (item.id === activeId ? ' active' : '');
+    row.onclick = () => activate(item.id);
+
+    const dot = document.createElement('span');
+    dot.className = 'dot' + (item.alive ? '' : ' dead');
+    dot.title = item.alive ? 'rodando' : 'processo encerrado';
+
+    const label = document.createElement('span');
+    label.className = 'label';
+    label.textContent = item.name;
+    label.title = `${item.command} — ${item.cwd}`;
+    // Duplo clique renomeia sem sair da sidebar.
+    label.ondblclick = (event) => {
+      event.stopPropagation();
+      startRename(row, label, item);
+    };
+
+    const kill = document.createElement('button');
+    kill.className = 'kill';
+    kill.textContent = '×';
+    kill.title = 'encerrar terminal';
+    kill.onclick = async (event) => {
+      event.stopPropagation();
+      await api(`/terminals/${item.id}`, { method: 'DELETE' });
+      closePane(item.id);
+      await refresh();
+    };
+
+    row.append(dot, label, kill);
+    listEl.append(row);
+  }
+}
+
+function startRename(row, label, item) {
+  const input = document.createElement('input');
+  input.value = item.name;
+  row.replaceChild(input, label);
+  input.focus();
+  input.select();
+
+  const commit = async () => {
+    const name = input.value.trim();
+    if (name && name !== item.name) {
+      await api(`/terminals/${item.id}`, { method: 'PATCH', body: JSON.stringify({ name }) });
+    }
+    await refresh();
+  };
+  input.onblur = commit;
+  input.onkeydown = (event) => {
+    if (event.key === 'Enter') commit();
+    if (event.key === 'Escape') refresh();
+  };
+  input.onclick = (event) => event.stopPropagation();
+}
+
+function ensurePane(id) {
+  if (panes.has(id)) return panes.get(id);
+
+  const host = document.createElement('div');
+  host.className = 'screen';
+  screensEl.append(host);
+
+  const term = new Terminal({
+    theme,
+    fontFamily: 'ui-monospace, "Cascadia Mono", Consolas, monospace',
+    fontSize: 13,
+    cursorBlink: true,
+    scrollback: 5000,
+    allowProposedApi: true,
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(host);
+
+  const socket = new WebSocket(`ws://${location.host}/ws/${id}`);
+  socket.binaryType = 'arraybuffer';
+  socket.onmessage = (event) => term.write(new Uint8Array(event.data));
+  socket.onopen = () => sendResize(socket, fit, term);
+  socket.onclose = () => term.write('\r\n\x1b[38;5;244m[ponte fechada — o processo segue no daemon]\x1b[0m\r\n');
+
+  term.onData((data) => {
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'input', data }));
+    }
+  });
+
+  const pane = { host, term, fit, socket };
+  panes.set(id, pane);
+  return pane;
+}
+
+function sendResize(socket, fit, term) {
+  fit.fit();
+  if (socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+  }
+}
+
+function closePane(id) {
+  const pane = panes.get(id);
+  if (!pane) return;
+  pane.socket.close();
+  pane.term.dispose();
+  pane.host.remove();
+  panes.delete(id);
+}
+
+async function activate(id) {
+  activeId = id;
+  placeholderEl.style.display = 'none';
+  const pane = ensurePane(id);
+  for (const [paneId, other] of panes) {
+    other.host.classList.toggle('active', paneId === id);
+  }
+  pane.term.focus();
+  sendResize(pane.socket, pane.fit, pane.term);
+  const terminals = await api('/terminals');
+  renderSidebar(terminals);
+  updateTopbar(terminals.find((item) => item.id === id));
+}
+
+async function updateTopbar(item) {
+  document.getElementById('active-name').textContent = item ? item.name : '—';
+  document.getElementById('active-cwd').textContent = item ? item.cwd : '';
+  const sessionEl = document.getElementById('active-session');
+  sessionEl.textContent = '';
+  if (!item) return;
+
+  // A ponte com o Claude Code: qual sessão este terminal está usando.
+  try {
+    const info = await api(`/terminals/${item.id}/claude-session`);
+    if (!info.session_id) return;
+    const code = document.createElement('code');
+    code.textContent = info.resume_command;
+    code.title = 'clique para copiar';
+    code.onclick = () => navigator.clipboard.writeText(info.resume_command);
+    sessionEl.append(code);
+  } catch {
+    /* terminal sem sessão de Claude — normal para shell */
+  }
+}
+
+async function createTerminal(kind) {
+  const defaultName = kind === 'claude' ? `claude-${panes.size + 1}` : `shell-${panes.size + 1}`;
+  const created = await api('/terminals', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: defaultName,
+      command: kind === 'claude' ? 'claude' : null,
+    }),
+  });
+  await refresh();
+  await activate(created.id);
+}
+
+document.getElementById('new-claude').onclick = () => createTerminal('claude');
+document.getElementById('new-shell').onclick = () => createTerminal('shell');
+
+window.addEventListener('resize', () => {
+  const pane = panes.get(activeId);
+  if (pane) sendResize(pane.socket, pane.fit, pane.term);
+});
+
+// O daemon é a fonte de verdade: repescar a lista mostra terminal que morreu sozinho.
+setInterval(() => refresh().catch(() => {}), 4000);
+refresh().catch((error) => {
+  placeholderEl.textContent = `daemon não respondeu: ${error.message}`;
+});
+</script>
+</body>
+</html>
