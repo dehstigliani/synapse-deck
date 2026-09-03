@@ -38,6 +38,11 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName={#AppName} {#AppVersion}
+; O ícone do próprio instalador e o que aparece em Programas e Recursos.
+; Usa favicon.ico (formato híbrido BMP+PNG que o Inno lê sem ressalva);
+; o executável usa app.ico, que tem arte própria para 16 e 24 px.
+SetupIconFile=..\..\web\assets\favicon.ico
+UninstallDisplayIcon={app}\synapse-deck.exe
 LicenseFile=..\..\LICENSE
 
 [Languages]

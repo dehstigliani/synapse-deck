@@ -3,6 +3,17 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [1.0.0-alpha.4] — 2026-09-03
+
+### Adicionado
+
+- **Ícone no executável do Windows**, com arte por tamanho: em 16 e 24 px só o
+  raio, porque a marca inteira vira mancha nesse tamanho; de 32 px em diante o
+  desenho completo. O instalador e a entrada em Programas e Recursos usam o mesmo
+  ícone.
+- **Propriedades do arquivo** preenchidas — nome, descrição, autor e licença
+  aparecem na aba Detalhes do Windows.
+
 ## [1.0.0-alpha.3] — 2026-09-03
 
 ### Corrigido
