@@ -172,6 +172,9 @@
   .pulse .sep { color: var(--border); }
   .pulse .bar { display: block; width: 54px; height: 6px; background: var(--accent-soft); border-radius: 3px; overflow: hidden; }
   .pulse .fill { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  .pulse .fill.mid { background: var(--warn); }
+  .pulse .fill.high { background: var(--danger); }
+  .pulse .reset { color: var(--muted); }
 
   /* medidor de contexto */
   .meter { display: flex; align-items: center; gap: 7px; }
@@ -301,13 +304,15 @@
       <span class="cwd" id="active-cwd"></span>
       <span class="spacer"></span>
       <span class="pulse" id="pulse" hidden>
-        <span class="label">hora</span>
-        <span class="bar"><span class="fill" id="pulse-fill"></span></span>
-        <span class="value" id="pulse-hour">—</span>
+        <span class="label">5h</span>
+        <span class="bar"><span class="fill" id="pulse-5h-fill"></span></span>
+        <span class="value" id="pulse-5h">—</span>
+        <span class="reset" id="pulse-5h-reset"></span>
         <span class="sep">|</span>
-        <span class="label">semana</span>
+        <span class="label">7d</span>
         <span class="bar"><span class="fill" id="pulse-week-fill"></span></span>
         <span class="value" id="pulse-week">—</span>
+        <span class="reset" id="pulse-week-reset"></span>
       </span>
       <span class="meter" id="meter" hidden>
         <span title="quanto da janela de contexto a sessão já ocupa">contexto</span>
@@ -704,30 +709,61 @@ async function activate(id) {
 const activeTerminal = () => terminals.find((item) => item.id === activeId);
 
 // ---------------------------------------------------------------- pulso
-/// Consumo recente na navbar: a última hora, a janela de 5h e a semana.
+/// Quanto tempo falta, em linguagem de relógio.
+const formatCountdown = (seconds) => {
+  if (seconds <= 0) return 'expirada';
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return hours ? `${hours}h${String(minutes).padStart(2, '0')}` : `${minutes}min`;
+};
+
+/// Consumo por janela de limite, na navbar.
 ///
-/// A porcentagem compara a hora atual com a **hora mais cheia já registrada**,
-/// não com a cota do plano — esse número não existe nos arquivos locais.
+/// A janela **não desliza com o relógio**: ela começa na primeira mensagem e
+/// vale 5h (ou 7 dias) a partir dali — é assim que o limite se renova. Por isso
+/// existe um contador de reset, e por isso uma janela vencida mostra zero em vez
+/// de arrastar o consumo antigo.
+///
+/// ⚠️ O início é inferido do histórico local de mensagens. O relógio real do
+/// limite fica no servidor do provedor e não está nos arquivos — se você usou o
+/// Claude em outra máquina, a âncora daqui pode divergir.
 async function updatePulse() {
   const pulse = await api('/usage/pulse');
   const box = document.getElementById('pulse');
-  document.getElementById('pulse-hour').textContent =
-    `${formatTokens(pulse.tokens_last_hour)} · ${pulse.hour_percent.toFixed(0)}%`;
-  document.getElementById('pulse-week').textContent =
-    `${formatTokens(pulse.tokens_last_week)} · ${pulse.week_percent.toFixed(0)}%`;
 
-  document.getElementById('pulse-fill').style.width = `${Math.min(pulse.hour_percent, 100)}%`;
-  document.getElementById('pulse-week-fill').style.width = `${Math.min(pulse.week_percent, 100)}%`;
+  const meters = [
+    [pulse.five_hour, 'pulse-5h', 'pulse-5h-fill', 'pulse-5h-reset'],
+    [pulse.week, 'pulse-week', 'pulse-week-fill', 'pulse-week-reset'],
+  ];
+  for (const [window, valueId, fillId, resetId] of meters) {
+    document.getElementById(valueId).textContent = window.active
+      ? `${formatTokens(window.tokens)} · ${window.percent.toFixed(0)}%`
+      : '—';
+    document.getElementById(resetId).textContent = window.active
+      ? `↻ ${formatCountdown(window.seconds_to_reset)}`
+      : '↻ pronta';
+    const fill = document.getElementById(fillId);
+    fill.style.width = `${Math.min(window.percent, 100)}%`;
+    fill.className = 'fill' + (window.percent > 85 ? ' high' : window.percent > 60 ? ' mid' : '');
+  }
+
+  const when = (epoch) => new Date(epoch * 1000).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+  const describe = (label, window) =>
+    window.started_at
+      ? `${label}: ${formatTokens(window.tokens)} · ${window.percent.toFixed(0)}% do seu pico ` +
+        `(${formatTokens(window.peak_tokens)})\n` +
+        `  começou ${when(window.started_at)} · ` +
+        (window.active ? `reseta ${when(window.resets_at)}` : 'ciclo vencido, a próxima mensagem abre outro')
+      : `${label}: sem histórico`;
 
   box.title =
-    `última hora: ${formatTokens(pulse.tokens_last_hour)} tokens\n` +
-    `janela de 5h: ${formatTokens(pulse.tokens_last_5h)} · ${pulse.five_hour_percent.toFixed(0)}%\n` +
-    `últimos 7 dias: ${formatTokens(pulse.tokens_last_week)} · ${pulse.week_percent.toFixed(0)}%\n\n` +
-    `picos já registrados — hora ${formatTokens(pulse.peak_hour_tokens)}, ` +
-    `5h ${formatTokens(pulse.peak_5h_tokens)}, ` +
-    `semana ${formatTokens(pulse.peak_week_tokens)}\n\n` +
-    `As % comparam com o seu próprio pico, não com a cota do plano — ` +
-    `o limite do plano não está nos arquivos locais.`;
+    `${describe('janela de 5h', pulse.five_hour)}\n` +
+    `${describe('janela de 7 dias', pulse.week)}\n\n` +
+    `última hora: ${formatTokens(pulse.tokens_last_hour)}\n\n` +
+    `A janela começa na sua primeira mensagem e vale 5h (ou 7 dias) a partir dali — ` +
+    `não desliza com o relógio.\n` +
+    `O início é inferido do histórico local; o relógio real do limite fica no servidor ` +
+    `do provedor e não está nos arquivos.`;
   box.hidden = false;
 }
 

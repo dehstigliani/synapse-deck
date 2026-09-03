@@ -47,12 +47,16 @@ pub struct SessionSummary {
     pub message_count: usize,
     pub usage: SessionUsage,
     pub resume_command: String,
-    /// Tokens por hora do relógio, para o pulso da navbar.
+    /// Cada resposta do modelo como `(instante, tokens processados)`.
+    ///
+    /// Guardado no instante exato, e não em balde de hora, porque a janela de
+    /// limite é ancorada na primeira mensagem — arredondar para a hora cheia
+    /// erraria o momento do reset em até uma hora.
     ///
     /// Fica fora do JSON: é detalhe interno, e serializar isso em toda listagem
     /// de sessão engordaria a resposta à toa.
     #[serde(skip)]
-    pub hourly: Vec<(u64, u64)>,
+    pub events: Vec<(u64, u64)>,
 }
 
 /// Traduz um diretório de trabalho no slug que o Claude Code usa em
@@ -127,7 +131,7 @@ pub fn parse_session(id: String, modified: u64, content: &str) -> SessionSummary
     let mut message_count = 0usize;
     let mut usage = SessionUsage::default();
     let mut peak_context = 0u64;
-    let mut hourly: HashMap<u64, u64> = HashMap::new();
+    let mut events: Vec<(u64, u64)> = Vec::new();
 
     for line in content.lines() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else {
@@ -184,14 +188,12 @@ pub fn parse_session(id: String, modified: u64, content: &str) -> SessionSummary
                 usage.context_tokens = context;
                 peak_context = peak_context.max(context);
 
-                // Balde da hora cheia em que a resposta foi gravada.
                 if let Some(at) = entry
                     .get("timestamp")
                     .and_then(Value::as_str)
                     .and_then(parse_timestamp)
                 {
-                    let processed = context + number("output_tokens");
-                    *hourly.entry(at / 3_600 * 3_600).or_insert(0) += processed;
+                    events.push((at, context + number("output_tokens")));
                 }
             }
             _ => {}
@@ -207,7 +209,7 @@ pub fn parse_session(id: String, modified: u64, content: &str) -> SessionSummary
         (usage.context_tokens as f64 / usage.context_limit as f64 * 100.0).min(100.0);
 
     SessionSummary {
-        hourly: hourly.into_iter().collect(),
+        events,
         resume_command: format!("claude --resume {id}"),
         id,
         title: truncate(&title, 120),
@@ -744,50 +746,77 @@ pub fn active_sessions(within_seconds: u64) -> Vec<SessionSummary> {
 
 
 
-/// O pulso de consumo: quanto foi gasto agora, na janela de limite e na semana.
+/// Uma janela de limite: quando começou, quanto já consumiu e quando reseta.
 #[derive(Debug, Default, Clone, Serialize)]
-pub struct UsagePulse {
-    pub tokens_last_hour: u64,
-    /// A janela de 5 horas é o ciclo de limite das assinaturas.
-    pub tokens_last_5h: u64,
-    pub tokens_last_week: u64,
-    /// Os picos já registrados, que servem de denominador para as porcentagens.
-    ///
-    /// ⚠️ Nenhum deles é a cota do plano — esse número não existe em disco. As
-    /// porcentagens comparam o ritmo de agora com o pico do próprio usuário.
-    pub peak_hour_tokens: u64,
-    pub peak_5h_tokens: u64,
-    pub peak_week_tokens: u64,
-    pub hour_percent: f64,
-    pub five_hour_percent: f64,
-    pub week_percent: f64,
+pub struct UsageWindow {
+    /// Instante da primeira mensagem da janela — é ela que ancora o ciclo.
+    pub started_at: u64,
+    pub resets_at: u64,
+    /// Zero quando a janela já expirou e nenhuma mensagem abriu a próxima.
+    pub seconds_to_reset: u64,
+    pub tokens: u64,
+    /// Maior consumo já registrado numa janela deste tamanho.
+    pub peak_tokens: u64,
+    pub percent: f64,
+    /// `false` quando o ciclo já venceu: a próxima mensagem começa um novo.
+    pub active: bool,
 }
 
-/// Maior soma de uma janela deslizante sobre uma série ordenada de baldes.
-///
-/// Os baldes vazios contam como zero: uma pausa no meio da janela não pode
-/// inflar o pico juntando dois picos separados por dias de silêncio.
-fn peak_window(buckets: &HashMap<u64, u64>, bucket_size: u64, window: u64) -> u64 {
-    if buckets.is_empty() {
-        return 0;
-    }
-    let mut ordered: Vec<(u64, u64)> = buckets.iter().map(|(at, n)| (*at, *n)).collect();
-    ordered.sort_by_key(|(at, _)| *at);
+/// O pulso de consumo, por janela de limite.
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct UsagePulse {
+    /// O ciclo de 5 horas, que é como o limite das assinaturas se renova.
+    pub five_hour: UsageWindow,
+    /// O ciclo semanal.
+    pub week: UsageWindow,
+    /// Consumo da última hora corrida, só como leitura de ritmo instantâneo.
+    pub tokens_last_hour: u64,
+}
 
-    let mut peak = 0u64;
-    let mut start = 0usize;
-    let mut running = 0u64;
-    for index in 0..ordered.len() {
-        running += ordered[index].1;
-        // Encolhe pela esquerda enquanto a janela for maior que o permitido.
-        while ordered[index].0.saturating_sub(ordered[start].0) >= window {
-            running -= ordered[start].1;
-            start += 1;
+/// Fatia os eventos em janelas de limite, ancorando cada uma na primeira
+/// mensagem que a abre.
+///
+/// É assim que o limite funciona de verdade: a janela **não** desliza com o
+/// relógio. Ela começa quando você fala, vale `span` segundos, e só depois disso
+/// a mensagem seguinte abre um ciclo novo.
+///
+/// Espera `events` ordenado por instante.
+fn split_windows(events: &[(u64, u64)], span: u64) -> Vec<(u64, u64)> {
+    let mut windows: Vec<(u64, u64)> = Vec::new();
+    for (at, tokens) in events {
+        match windows.last_mut() {
+            Some((started_at, sum)) if *at < started_at.saturating_add(span) => *sum += tokens,
+            _ => windows.push((*at, *tokens)),
         }
-        let _ = bucket_size;
-        peak = peak.max(running);
     }
-    peak
+    windows
+}
+
+/// Monta a janela corrente a partir da série de eventos.
+fn current_window(events: &[(u64, u64)], span: u64, now: u64) -> UsageWindow {
+    let windows = split_windows(events, span);
+    let Some((started_at, tokens)) = windows.last().copied() else {
+        return UsageWindow::default();
+    };
+
+    let resets_at = started_at.saturating_add(span);
+    let active = now < resets_at;
+    let peak_tokens = windows.iter().map(|(_, sum)| *sum).max().unwrap_or(0);
+
+    UsageWindow {
+        started_at,
+        resets_at,
+        seconds_to_reset: if active { resets_at - now } else { 0 },
+        // Janela vencida não tem consumo corrente: o ciclo seguinte nasce zerado.
+        tokens: if active { tokens } else { 0 },
+        peak_tokens,
+        percent: if active && peak_tokens > 0 {
+            (tokens as f64 / peak_tokens as f64 * 100.0).min(100.0)
+        } else {
+            0.0
+        },
+        active,
+    }
 }
 
 pub fn usage_pulse() -> UsagePulse {
@@ -796,48 +825,25 @@ pub fn usage_pulse() -> UsagePulse {
         .unwrap_or(Duration::ZERO)
         .as_secs();
 
-    let mut pulse = UsagePulse::default();
-    let mut totals_by_hour: HashMap<u64, u64> = HashMap::new();
-
+    let mut events: Vec<(u64, u64)> = Vec::new();
     for directory in all_project_directories() {
         for transcript in transcripts_in(&directory) {
-            let Some(session) = read_session_cached(&transcript) else {
-                continue;
-            };
-            for (hour, tokens) in session.hourly {
-                *totals_by_hour.entry(hour).or_insert(0) += tokens;
+            if let Some(session) = read_session_cached(&transcript) {
+                events.extend(session.events);
             }
         }
     }
+    events.sort_by_key(|(at, _)| *at);
 
-    for (hour, tokens) in &totals_by_hour {
-        let age = now.saturating_sub(*hour);
-        if age <= 3_600 {
-            pulse.tokens_last_hour += tokens;
-        }
-        if age <= 5 * 3_600 {
-            pulse.tokens_last_5h += tokens;
-        }
-        if age <= 7 * 86_400 {
-            pulse.tokens_last_week += tokens;
-        }
-        pulse.peak_hour_tokens = pulse.peak_hour_tokens.max(*tokens);
+    UsagePulse {
+        five_hour: current_window(&events, 5 * 3_600, now),
+        week: current_window(&events, 7 * 86_400, now),
+        tokens_last_hour: events
+            .iter()
+            .filter(|(at, _)| now.saturating_sub(*at) <= 3_600)
+            .map(|(_, tokens)| tokens)
+            .sum(),
     }
-
-    pulse.peak_5h_tokens = peak_window(&totals_by_hour, 3_600, 5 * 3_600);
-    pulse.peak_week_tokens = peak_window(&totals_by_hour, 3_600, 7 * 86_400);
-
-    let ratio = |part: u64, whole: u64| {
-        if whole == 0 {
-            0.0
-        } else {
-            (part as f64 / whole as f64 * 100.0).min(100.0)
-        }
-    };
-    pulse.hour_percent = ratio(pulse.tokens_last_hour, pulse.peak_hour_tokens);
-    pulse.five_hour_percent = ratio(pulse.tokens_last_5h, pulse.peak_5h_tokens);
-    pulse.week_percent = ratio(pulse.tokens_last_week, pulse.peak_week_tokens);
-    pulse
 }
 
 #[cfg(test)]
@@ -917,18 +923,52 @@ mod tests {
         assert_eq!(usage.context_limit, EXTENDED_CONTEXT_LIMIT);
     }
 
+    const FIVE_HOURS: u64 = 5 * 3_600;
+
     #[test]
-    fn peak_window_ignores_gaps() {
-        let mut buckets = HashMap::new();
-        // Dois picos de 100 separados por 10 horas não podem virar um de 200.
-        buckets.insert(0u64, 100u64);
-        buckets.insert(36_000u64, 100u64);
-        // Duas horas seguidas somam de verdade.
-        buckets.insert(72_000u64, 30u64);
-        buckets.insert(75_600u64, 40u64);
-        assert_eq!(peak_window(&buckets, 3_600, 5 * 3_600), 100);
-        assert_eq!(peak_window(&buckets, 3_600, 7 * 86_400), 270);
-        assert_eq!(peak_window(&HashMap::new(), 3_600, 3_600), 0);
+    fn window_is_anchored_on_first_message_not_on_the_clock() {
+        // Primeira mensagem às 1000s abre um ciclo que vale até 1000+5h.
+        let events = [
+            (1_000u64, 10u64),
+            (1_000 + FIVE_HOURS - 1, 5),  // ainda dentro
+            (1_000 + FIVE_HOURS, 7),      // exatamente no limite: abre o próximo
+            (1_000 + FIVE_HOURS + 60, 3),
+        ];
+        let windows = split_windows(&events, FIVE_HOURS);
+        assert_eq!(windows, vec![(1_000, 15), (1_000 + FIVE_HOURS, 10)]);
+    }
+
+    #[test]
+    fn reset_counts_down_from_the_window_start() {
+        let start = 1_000_000u64;
+        let events = [(start, 40u64)];
+        // Duas horas depois do início, faltam três para resetar.
+        let window = current_window(&events, FIVE_HOURS, start + 2 * 3_600);
+        assert!(window.active);
+        assert_eq!(window.seconds_to_reset, 3 * 3_600);
+        assert_eq!(window.resets_at, start + FIVE_HOURS);
+        assert_eq!(window.tokens, 40);
+    }
+
+    #[test]
+    fn expired_window_reports_zero_not_stale_tokens() {
+        let start = 1_000_000u64;
+        let events = [(start, 40u64)];
+        // Seis horas depois, o ciclo venceu e nada o reabriu.
+        let window = current_window(&events, FIVE_HOURS, start + 6 * 3_600);
+        assert!(!window.active);
+        assert_eq!(window.seconds_to_reset, 0);
+        assert_eq!(window.tokens, 0);
+        assert_eq!(window.percent, 0.0);
+        // O pico histórico continua valendo como denominador.
+        assert_eq!(window.peak_tokens, 40);
+    }
+
+    #[test]
+    fn empty_history_does_not_panic() {
+        let window = current_window(&[], FIVE_HOURS, 1_000);
+        assert!(!window.active);
+        assert_eq!(window.tokens, 0);
     }
 
     #[test]
