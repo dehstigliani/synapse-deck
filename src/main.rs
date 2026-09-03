@@ -59,6 +59,22 @@ struct CwdQuery {
     cwd: String,
 }
 
+#[derive(Deserialize)]
+struct UsageQuery {
+    days: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct LimitQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct WithinQuery {
+    /// Janela em segundos para considerar a sessao ainda ativa.
+    within: Option<u64>,
+}
+
 #[derive(Serialize)]
 struct CreateResponse {
     #[serde(flatten)]
@@ -86,6 +102,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/terminals/:id/claude-session", get(terminal_session))
         .route("/api/groups", get(list_groups))
+        .route("/api/usage", get(usage_report))
+        .route("/api/sessions/by-boot", get(sessions_by_boot))
+        .route("/api/sessions/active", get(active_sessions))
         .route("/api/sessions", get(list_sessions))
         .route("/ws/:id", get(attach_terminal))
         .fallback_service(ServeDir::new("web"))
@@ -109,6 +128,21 @@ async fn list_groups(State(registry): State<Arc<Registry>>) -> Json<Vec<String>>
 /// Histórico de sessões do Claude Code num diretório — alimenta o painel de sessões.
 async fn list_sessions(Query(query): Query<CwdQuery>) -> Json<Vec<SessionSummary>> {
     Json(claude::list_sessions(&query.cwd))
+}
+
+/// Consumo agregado de todos os projetos: totais, por dia e por projeto.
+async fn usage_report(Query(query): Query<UsageQuery>) -> Json<claude::UsageReport> {
+    Json(claude::usage_report(query.days.unwrap_or(14)))
+}
+
+/// Sessoes agrupadas pelo boot do Windows em que estavam vivas.
+async fn sessions_by_boot(Query(query): Query<LimitQuery>) -> Json<Vec<claude::BootGroup>> {
+    Json(claude::sessions_by_boot(query.limit.unwrap_or(8)))
+}
+
+/// Sessoes escritas ha pouco: provavelmente abertas fora deste workspace.
+async fn active_sessions(Query(query): Query<WithinQuery>) -> Json<Vec<SessionSummary>> {
+    Json(claude::active_sessions(query.within.unwrap_or(900)))
 }
 
 async fn get_terminal(

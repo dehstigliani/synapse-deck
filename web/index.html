@@ -172,7 +172,7 @@
     border-radius: 3px;
     overflow: hidden;
   }
-  .meter .fill { height: 100%; width: 0; background: var(--alive); transition: width .3s; }
+  .meter .fill { display: block; height: 100%; width: 0; background: var(--alive); transition: width .3s; }
   .meter .fill.mid { background: var(--warn); }
   .meter .fill.high { background: var(--danger); }
   .meter .value { color: var(--text); }
@@ -217,6 +217,59 @@
   .session .title { color: var(--text); margin-bottom: 4px; word-break: break-word; }
   .session .meta { color: var(--muted); font-size: 11px; display: flex; gap: 8px; flex-wrap: wrap; }
   .session .meta .tokens { color: var(--accent); }
+
+  /* abas do painel */
+  .tabs { display: flex; border-bottom: 1px solid var(--border); }
+  .tabs button {
+    flex: 1;
+    padding: 9px 4px;
+    background: none;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    color: var(--muted);
+    font-size: 11px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+  }
+  .tabs button:hover { color: var(--text); }
+  .tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .panel-body { flex: 1; overflow-y: auto; padding: 10px; }
+
+  .boot-head {
+    color: var(--accent);
+    font-size: 11px;
+    padding: 10px 2px 5px;
+    border-bottom: 1px dashed var(--border);
+    margin-bottom: 6px;
+  }
+  .adopt {
+    margin-left: auto;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--muted);
+    font-size: 10px;
+    padding: 1px 6px;
+  }
+  .adopt:hover { color: var(--accent); border-color: var(--accent); }
+
+  /* cartões de uso */
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-bottom: 12px; }
+  .stat {
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 8px 10px;
+  }
+  .stat .k { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+  .stat .v { color: var(--text); font-size: 15px; margin-top: 2px; }
+  .stat .v.accent { color: var(--accent); }
+  .note { color: var(--muted); font-size: 11px; line-height: 1.5; margin: 10px 0; }
+  .bars { display: flex; flex-direction: column; gap: 4px; }
+  .bars .row { display: flex; align-items: center; gap: 7px; font-size: 11px; }
+  .bars .row .who { color: var(--muted); width: 78px; flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bars .row .track { display: block; flex: 1; height: 7px; background: var(--accent-soft); border-radius: 3px; overflow: hidden; }
+  .bars .row .fill { display: block; height: 100%; background: var(--accent); }
+  .bars .row .amount { color: var(--text); width: 52px; text-align: right; flex: none; }
 </style>
 </head>
 <body>
@@ -255,8 +308,13 @@
   </main>
 
   <section class="panel">
-    <h2>Histórico de sessões</h2>
-    <div class="sessions" id="sessions"><div class="empty">selecione um terminal</div></div>
+    <div class="tabs" id="tabs">
+      <button data-tab="sessions" class="active">Sessões</button>
+      <button data-tab="boot">Boot</button>
+      <button data-tab="active">Ativas</button>
+      <button data-tab="usage">Uso</button>
+    </div>
+    <div class="panel-body" id="panel-body"><div class="empty">selecione um terminal</div></div>
   </section>
 
 <script src="/vendor/xterm.js"></script>
@@ -318,7 +376,8 @@ const collapsedGroups = new Set();
 const listEl = document.getElementById('list');
 const screensEl = document.getElementById('screens');
 const placeholderEl = document.getElementById('placeholder');
-const sessionsEl = document.getElementById('sessions');
+const panelBody = document.getElementById('panel-body');
+let activeTab = 'sessions';
 
 async function api(path, options) {
   const response = await fetch(`/api${path}`, {
@@ -514,7 +573,7 @@ async function activate(id) {
   sendResize(pane.socket, pane.fit, pane.term);
   renderSidebar();
   await updateTopbar();
-  if (document.body.classList.contains('with-panel')) loadSessions();
+  if (document.body.classList.contains('with-panel')) renderPanel().catch(() => {});
 }
 
 const activeTerminal = () => terminals.find((item) => item.id === activeId);
@@ -558,60 +617,166 @@ async function updateTopbar() {
   }
 }
 
-// ---------------------------------------------------------------- sessões
-async function loadSessions() {
-  const item = activeTerminal();
-  sessionsEl.textContent = '';
-  if (!item) {
-    sessionsEl.innerHTML = '<div class="empty">selecione um terminal</div>';
-    return;
+// ---------------------------------------------------------------- painel
+const el = (tag, className, text) => {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+};
+
+function renderSessionCard(session, cwd, group, extra) {
+  const card = el('div', 'session');
+  card.title = 'abrir esta sessão num terminal novo';
+  card.onclick = () => resumeSession(session, cwd, group);
+  card.append(el('div', 'title', session.title || '(sem título)'));
+
+  const meta = el('div', 'meta');
+  meta.append(el('span', null, formatDate(session.modified)));
+  meta.append(el('span', null, `${session.message_count} msg`));
+  const total =
+    session.usage.input_tokens + session.usage.output_tokens + session.usage.cache_creation_tokens;
+  meta.append(el('span', 'tokens', `${formatTokens(total)} tok`));
+  if (session.usage.context_percent > 0) {
+    meta.append(el('span', null, `${session.usage.context_percent.toFixed(0)}% ctx`));
   }
-
-  const sessions = await api(`/sessions?cwd=${encodeURIComponent(item.cwd)}`);
-  if (!sessions.length) {
-    sessionsEl.innerHTML = '<div class="empty">nenhuma sessão neste diretório</div>';
-    return;
-  }
-
-  for (const session of sessions) {
-    const card = document.createElement('div');
-    card.className = 'session';
-    card.title = 'abrir esta sessão num terminal novo';
-    card.onclick = () => resumeSession(session, item);
-
-    const title = document.createElement('div');
-    title.className = 'title';
-    title.textContent = session.title || '(sem título)';
-
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    const when = document.createElement('span');
-    when.textContent = formatDate(session.modified);
-    const count = document.createElement('span');
-    count.textContent = `${session.message_count} msg`;
-    const tokens = document.createElement('span');
-    tokens.className = 'tokens';
-    const total = session.usage.input_tokens + session.usage.output_tokens + session.usage.cache_creation_tokens;
-    tokens.textContent = `${formatTokens(total)} tok`;
-    meta.append(when, count, tokens);
-
-    card.append(title, meta);
-    sessionsEl.append(card);
-  }
+  if (extra) meta.append(extra);
+  card.append(meta);
+  return card;
 }
 
-async function resumeSession(session, item) {
+async function renderPanel() {
+  panelBody.textContent = '';
+  const item = activeTerminal();
+
+  if (activeTab === 'sessions') {
+    if (!item) return panelBody.append(el('div', 'empty', 'selecione um terminal'));
+    const sessions = await api(`/sessions?cwd=${encodeURIComponent(item.cwd)}`);
+    if (!sessions.length) return panelBody.append(el('div', 'empty', 'nenhuma sessão neste diretório'));
+    for (const session of sessions) panelBody.append(renderSessionCard(session, item.cwd, item.group));
+    return;
+  }
+
+  if (activeTab === 'boot') {
+    panelBody.append(el('div', 'empty', 'lendo o log de eventos do Windows…'));
+    const groups = await api('/sessions/by-boot?limit=8');
+    panelBody.textContent = '';
+    if (!groups.length) return panelBody.append(el('div', 'empty', 'nenhum boot encontrado'));
+    for (const group of groups) {
+      const when = new Date(group.boot_at * 1000);
+      panelBody.append(
+        el('div', 'boot-head', `boot ${when.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })} · ${group.sessions.length} sessões`),
+      );
+      for (const session of group.sessions) {
+        panelBody.append(renderSessionCard(session, item?.cwd, item?.group));
+      }
+    }
+    return;
+  }
+
+  if (activeTab === 'active') {
+    const sessions = await api('/sessions/active?within=900');
+    if (!sessions.length) return panelBody.append(el('div', 'empty', 'nenhuma sessão ativa nos últimos 15 min'));
+    panelBody.append(
+      el('div', 'note', 'Sessões com transcript escrito há pouco — provavelmente abertas em outro terminal. Adotar reabre a conversa aqui com --resume, num processo novo; feche a janela antiga.'),
+    );
+    for (const session of sessions) {
+      const adopt = el('button', 'adopt', 'adotar');
+      adopt.onclick = (event) => {
+        event.stopPropagation();
+        resumeSession(session, item?.cwd, 'adotadas');
+      };
+      panelBody.append(renderSessionCard(session, item?.cwd, 'adotadas', adopt));
+    }
+    return;
+  }
+
+  // aba de uso
+  panelBody.append(el('div', 'empty', 'somando os transcripts…'));
+  const report = await api('/usage?days=10');
+  panelBody.textContent = '';
+  const totals = report.totals;
+
+  const grid = el('div', 'stat-grid');
+  const stat = (label, value, accent) => {
+    const box = el('div', 'stat');
+    box.append(el('div', 'k', label));
+    box.append(el('div', 'v' + (accent ? ' accent' : ''), value));
+    return box;
+  };
+  grid.append(stat('sessões', `${totals.sessions}`));
+  grid.append(stat('projetos', `${totals.projects}`));
+  grid.append(stat('saída', formatTokens(totals.output_tokens)));
+  grid.append(stat('raciocínio', `${(totals.thinking_ratio * 100).toFixed(0)}%`));
+  grid.append(stat('cache aproveitado', `${(totals.cache_hit_ratio * 100).toFixed(1)}%`, true));
+  grid.append(stat('equiv. API', `US$ ${totals.cost_usd_equivalent.toFixed(0)}`, true));
+  panelBody.append(grid);
+
+  panelBody.append(
+    el('div', 'note', 'O valor em dólar é o que este consumo custaria pela API. Assinatura não cobra por token — serve para comparar sessões, não como fatura.'),
+  );
+
+  const maxDay = Math.max(...report.by_day.map((day) => day.tokens), 1);
+  panelBody.append(el('div', 'boot-head', 'por dia'));
+  const days = el('div', 'bars');
+  for (const day of report.by_day) {
+    const row = el('div', 'row');
+    row.append(el('span', 'who', day.date.slice(5)));
+    const track = el('span', 'track');
+    const fill = el('span', 'fill');
+    fill.style.width = `${(day.tokens / maxDay) * 100}%`;
+    track.append(fill);
+    row.append(track);
+    row.append(el('span', 'amount', formatTokens(day.tokens)));
+    row.title = `${day.sessions} sessões · US$ ${day.cost_usd_equivalent.toFixed(2)}`;
+    days.append(row);
+  }
+  panelBody.append(days);
+
+  const maxProject = Math.max(...report.by_project.map((project) => project.tokens), 1);
+  panelBody.append(el('div', 'boot-head', 'por projeto'));
+  const projects = el('div', 'bars');
+  for (const project of report.by_project) {
+    const row = el('div', 'row');
+    // O slug é o caminho com separadores trocados; o fim é o que identifica.
+    row.append(el('span', 'who', project.slug.split('-').filter(Boolean).slice(-2).join('/')));
+    const track = el('span', 'track');
+    const fill = el('span', 'fill');
+    fill.style.width = `${(project.tokens / maxProject) * 100}%`;
+    track.append(fill);
+    row.append(track);
+    row.append(el('span', 'amount', formatTokens(project.tokens)));
+    row.title = `${project.slug} · ${project.sessions} sessões`;
+    projects.append(row);
+  }
+  panelBody.append(projects);
+}
+
+async function resumeSession(session, cwd, group) {
   const created = await api('/terminals', {
     method: 'POST',
     body: JSON.stringify({
       name: (session.title || session.id).slice(0, 28),
-      group: item.group,
-      cwd: item.cwd,
+      group: group || 'Geral',
+      cwd,
       resume: session.id,
     }),
   });
   await refresh();
   await activate(created.id);
+}
+
+for (const button of document.getElementById('tabs').children) {
+  button.onclick = () => {
+    activeTab = button.dataset.tab;
+    for (const other of button.parentElement.children) {
+      other.classList.toggle('active', other === button);
+    }
+    renderPanel().catch((error) => {
+      panelBody.textContent = '';
+      panelBody.append(el('div', 'empty', `falhou: ${error.message}`));
+    });
+  };
 }
 
 // ---------------------------------------------------------------- criação
@@ -639,7 +804,7 @@ document.getElementById('new-group').onclick = () => {
 
 document.getElementById('toggle-panel').onclick = () => {
   document.body.classList.toggle('with-panel');
-  if (document.body.classList.contains('with-panel')) loadSessions();
+  if (document.body.classList.contains('with-panel')) renderPanel().catch(() => {});
   const pane = panes.get(activeId);
   if (pane) sendResize(pane.socket, pane.fit, pane.term);
 };

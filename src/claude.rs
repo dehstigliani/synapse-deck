@@ -7,8 +7,11 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Janela de contexto padrão dos modelos Claude.
 const DEFAULT_CONTEXT_LIMIT: u64 = 200_000;
@@ -104,7 +107,7 @@ pub fn read_session(path: &Path) -> Option<SessionSummary> {
         .ok()?
         .modified()
         .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
         .ok()?
         .as_secs();
 
@@ -292,4 +295,361 @@ pub fn trust_directory(cwd: &str) -> Result<bool> {
     fs::write(&temporary, serde_json::to_string(&config)?)?;
     fs::rename(&temporary, &config_path)?;
     Ok(true)
+}
+
+// ============================================================ preço e custo
+
+/// Preço em dólar por milhão de tokens. Fonte: tabela oficial de modelos.
+struct ModelPricing {
+    input: f64,
+    output: f64,
+}
+
+/// Cache lido custa 0,1× o preço de entrada; cache escrito custa 1,25× (TTL 5min).
+const CACHE_READ_MULTIPLIER: f64 = 0.1;
+const CACHE_WRITE_MULTIPLIER: f64 = 1.25;
+
+fn pricing_for(model: &str) -> ModelPricing {
+    let model = model.to_ascii_lowercase();
+    if model.contains("fable") || model.contains("mythos") {
+        ModelPricing { input: 10.0, output: 50.0 }
+    } else if model.contains("haiku") {
+        ModelPricing { input: 1.0, output: 5.0 }
+    } else if model.contains("sonnet-5") {
+        ModelPricing { input: 2.0, output: 10.0 }
+    } else if model.contains("sonnet") {
+        ModelPricing { input: 3.0, output: 15.0 }
+    } else {
+        // Família Opus, e o palpite seguro para modelo desconhecido.
+        ModelPricing { input: 5.0, output: 25.0 }
+    }
+}
+
+/// Custo em dólar equivalente, como se aquele consumo tivesse passado pela API.
+///
+/// ⚠️ Assinatura (Max/Pro) não cobra por token — este número é **referência de
+/// grandeza**, não fatura. Serve para comparar sessões e projetos entre si.
+fn cost_of(usage: &SessionUsage) -> f64 {
+    let price = pricing_for(usage.model.as_deref().unwrap_or("claude-opus-5"));
+    let million = 1_000_000.0;
+    (usage.input_tokens as f64 * price.input
+        + usage.output_tokens as f64 * price.output
+        + usage.cache_read_tokens as f64 * price.input * CACHE_READ_MULTIPLIER
+        + usage.cache_creation_tokens as f64 * price.input * CACHE_WRITE_MULTIPLIER)
+        / million
+}
+
+// ============================================================ cache de leitura
+
+/// Transcript já lido, guardado pela data de modificação do arquivo.
+///
+/// Sem isto, cada abertura do painel releria centenas de megabytes de `.jsonl`.
+static SESSION_CACHE: Mutex<Option<HashMap<PathBuf, (u64, SessionSummary)>>> = Mutex::new(None);
+
+fn read_session_cached(path: &Path) -> Option<SessionSummary> {
+    let modified = fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+
+    {
+        let mut guard = SESSION_CACHE.lock().unwrap();
+        let cache = guard.get_or_insert_with(HashMap::new);
+        if let Some((cached_at, summary)) = cache.get(path) {
+            if *cached_at == modified {
+                return Some(summary.clone());
+            }
+        }
+    }
+
+    let summary = read_session(path)?;
+    SESSION_CACHE
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(path.to_path_buf(), (modified, summary.clone()));
+    Some(summary)
+}
+
+// ============================================================ varredura geral
+
+/// Todos os diretórios de projeto do Claude Code.
+fn all_project_directories() -> Vec<PathBuf> {
+    let Some(home) = home_directory() else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(home.join(".claude").join("projects")) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect()
+}
+
+fn transcripts_in(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+        .collect()
+}
+
+// ============================================================ relatório de uso
+
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct UsageTotals {
+    pub sessions: usize,
+    pub projects: usize,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub thinking_tokens: u64,
+    /// Fração da entrada que veio do cache — quanto o cache está economizando.
+    pub cache_hit_ratio: f64,
+    /// Fração da saída gasta raciocinando.
+    pub thinking_ratio: f64,
+    pub cost_usd_equivalent: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DailyUsage {
+    pub date: String,
+    pub sessions: usize,
+    pub tokens: u64,
+    pub cost_usd_equivalent: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectUsage {
+    pub slug: String,
+    pub sessions: usize,
+    pub tokens: u64,
+    pub cost_usd_equivalent: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UsageReport {
+    pub totals: UsageTotals,
+    pub by_day: Vec<DailyUsage>,
+    pub by_project: Vec<ProjectUsage>,
+}
+
+/// Data civil a partir do epoch, sem dependência externa (Howard Hinnant).
+fn day_of(epoch_seconds: u64) -> String {
+    let days = (epoch_seconds / 86_400) as i64;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Varre todos os projetos e devolve o consumo agregado.
+pub fn usage_report(days: usize) -> UsageReport {
+    let mut totals = UsageTotals::default();
+    let mut per_day: HashMap<String, (usize, u64, f64)> = HashMap::new();
+    let mut per_project: Vec<ProjectUsage> = Vec::new();
+
+    for directory in all_project_directories() {
+        let slug = directory
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mut project = ProjectUsage {
+            slug,
+            sessions: 0,
+            tokens: 0,
+            cost_usd_equivalent: 0.0,
+        };
+
+        for transcript in transcripts_in(&directory) {
+            let Some(session) = read_session_cached(&transcript) else {
+                continue;
+            };
+            let usage = &session.usage;
+            let tokens = usage.input_tokens
+                + usage.output_tokens
+                + usage.cache_creation_tokens
+                + usage.cache_read_tokens;
+            let cost = cost_of(usage);
+
+            totals.sessions += 1;
+            totals.input_tokens += usage.input_tokens;
+            totals.output_tokens += usage.output_tokens;
+            totals.cache_read_tokens += usage.cache_read_tokens;
+            totals.cache_creation_tokens += usage.cache_creation_tokens;
+            totals.thinking_tokens += usage.thinking_tokens;
+            totals.cost_usd_equivalent += cost;
+
+            project.sessions += 1;
+            project.tokens += tokens;
+            project.cost_usd_equivalent += cost;
+
+            let entry = per_day.entry(day_of(session.modified)).or_insert((0, 0, 0.0));
+            entry.0 += 1;
+            entry.1 += tokens;
+            entry.2 += cost;
+        }
+
+        if project.sessions > 0 {
+            totals.projects += 1;
+            per_project.push(project);
+        }
+    }
+
+    let total_input = totals.input_tokens + totals.cache_read_tokens + totals.cache_creation_tokens;
+    if total_input > 0 {
+        totals.cache_hit_ratio = totals.cache_read_tokens as f64 / total_input as f64;
+    }
+    if totals.output_tokens > 0 {
+        totals.thinking_ratio = totals.thinking_tokens as f64 / totals.output_tokens as f64;
+    }
+
+    let mut by_day: Vec<DailyUsage> = per_day
+        .into_iter()
+        .map(|(date, (sessions, tokens, cost))| DailyUsage {
+            date,
+            sessions,
+            tokens,
+            cost_usd_equivalent: cost,
+        })
+        .collect();
+    by_day.sort_by(|a, b| b.date.cmp(&a.date));
+    by_day.truncate(days);
+    by_day.reverse();
+
+    per_project.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+    per_project.truncate(12);
+
+    UsageReport {
+        totals,
+        by_day,
+        by_project: per_project,
+    }
+}
+
+// ============================================================ sessões por boot
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BootGroup {
+    /// Momento em que o Windows subiu.
+    pub boot_at: u64,
+    pub label: String,
+    pub sessions: Vec<SessionSummary>,
+}
+
+/// Momentos de boot do Windows, do mais recente para o mais antigo.
+///
+/// O evento 6005 do log de sistema é o marcador de boot. A consulta é lenta,
+/// então o resultado fica em cache por 15 minutos no processo.
+fn boot_times(limit: usize) -> Vec<u64> {
+    static BOOT_CACHE: Mutex<Option<(u64, Vec<u64>)>> = Mutex::new(None);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
+
+    if let Some((cached_at, boots)) = BOOT_CACHE.lock().unwrap().as_ref() {
+        if now.saturating_sub(*cached_at) < 900 {
+            return boots.clone();
+        }
+    }
+
+    let script = format!(
+        "Get-WinEvent -FilterHashtable @{{LogName='System';ID=6005}} -MaxEvents {limit} -ErrorAction SilentlyContinue | ForEach-Object {{ [DateTimeOffset]::new($_.TimeCreated.ToUniversalTime(), [TimeSpan]::Zero).ToUnixTimeSeconds() }}"
+    );
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output();
+
+    let boots: Vec<u64> = output
+        .ok()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|line| line.trim().parse::<u64>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    *BOOT_CACHE.lock().unwrap() = Some((now, boots.clone()));
+    boots
+}
+
+/// Agrupa as sessões pelo boot do Windows em que estavam vivas.
+pub fn sessions_by_boot(limit: usize) -> Vec<BootGroup> {
+    let boots = boot_times(limit.max(1));
+    if boots.is_empty() {
+        return Vec::new();
+    }
+
+    let mut sessions: Vec<SessionSummary> = all_project_directories()
+        .iter()
+        .flat_map(|directory| transcripts_in(directory))
+        .filter_map(|path| read_session_cached(&path))
+        .collect();
+    sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
+
+    let mut groups: Vec<BootGroup> = boots
+        .iter()
+        .map(|boot_at| BootGroup {
+            boot_at: *boot_at,
+            label: day_of(*boot_at),
+            sessions: Vec::new(),
+        })
+        .collect();
+
+    // Cada sessão cai no boot mais recente que a precede.
+    for session in sessions {
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group| session.modified >= group.boot_at)
+        {
+            group.sessions.push(session);
+        }
+    }
+
+    groups.retain(|group| !group.sessions.is_empty());
+    groups
+}
+
+// ============================================================ sessões ativas
+
+/// Sessões cujo transcript foi escrito há pouco — quase certamente ainda abertas
+/// em algum terminal fora deste workspace.
+///
+/// ⚠️ Não dá para adotar o processo alheio: o sistema operacional não entrega o
+/// PTY de outro processo. O que o workspace faz é reabrir a conversa com
+/// `--resume`, continuando a sessão num processo novo; o terminal antigo deve
+/// ser fechado por quem o abriu.
+pub fn active_sessions(within_seconds: u64) -> Vec<SessionSummary> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
+
+    let mut sessions: Vec<SessionSummary> = all_project_directories()
+        .iter()
+        .flat_map(|directory| transcripts_in(directory))
+        .filter_map(|path| read_session_cached(&path))
+        .filter(|session| now.saturating_sub(session.modified) <= within_seconds)
+        .collect();
+
+    sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
+    sessions
 }

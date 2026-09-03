@@ -66,6 +66,9 @@ chegam entre o snapshot e a assinatura são perdidos e a tela fica furada.
 | `DELETE` | `/api/terminals/:id` | mata o processo e remove |
 | `GET` | `/api/terminals/:id/claude-session` | sessão atual + consumo (contexto, tokens, modelo) |
 | `GET` | `/api/sessions?cwd=…` | histórico de sessões daquele diretório |
+| `GET` | `/api/sessions/by-boot` | sessões agrupadas pelo boot do Windows |
+| `GET` | `/api/sessions/active` | sessões escritas há pouco (abertas fora do workspace) |
+| `GET` | `/api/usage?days=N` | consumo agregado: totais, por dia e por projeto |
 | `GET` | `/api/groups` | as pastas existentes |
 | `WS` | `/ws/:id` | liga ao PTY: replay do scrollback, depois ao vivo |
 
@@ -84,6 +87,21 @@ se a sessão já passou de 200k, a janela só pode ser a estendida.
 ⚠️ O que isto **não** dá é o **% da cota do plano** — esse denominador não está no
 arquivo. Só a API do provedor tem, e o preço de buscá-la é mandar o Bearer token
 para um endpoint não documentado a cada poucos minutos. Decisão consciente: fora.
+
+## Sessões por boot, e adotar sessão aberta em outro terminal
+
+**Por boot:** o evento 6005 do log de sistema do Windows marca cada inicialização.
+A aba Boot lê esses eventos e joga cada sessão no boot mais recente que a precede —
+é como reencontrar o que estava aberto antes de um reinício.
+
+**Ativas:** transcript escrito nos últimos 15 minutos quase sempre significa sessão
+aberta em algum terminal. É um indício, não certeza: o Claude Code pode tocar vários
+arquivos de uma vez, e aí sessões paradas aparecem juntas na lista.
+
+⚠️ **Adotar não é tomar o processo.** O sistema operacional não entrega o PTY de um
+processo a outro — isso não é limitação de implementação, é como o SO funciona. O
+que a adoção faz é reabrir a conversa aqui com `claude --resume`, num processo novo.
+A janela antiga continua viva e deve ser fechada por quem a abriu.
 
 ## Armadilhas do Windows que já custaram tempo
 
