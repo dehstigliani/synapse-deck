@@ -16,8 +16,13 @@ Não é produto e não tem receita prevista.
 - Um clique para criar terminal de **Claude** ou de **shell**
 - **Os processos vivem no daemon**: fechar o browser não mata a sessão, e ao voltar
   o scrollback é reproduzido
-- Detecta em qual **sessão do Claude Code** cada terminal está e entrega o
-  `claude --resume <id>` pronto para copiar
+- **Pastas** na sidebar: agrupa terminais, recolhe grupo, move terminal de pasta
+- **Histórico de sessões** do diretório: título, data, nº de mensagens e tokens de
+  cada sessão do Claude Code, e um clique abre qualquer uma num terminal novo
+- **Medidor de contexto**: quanto da janela a sessão já ocupa, em %
+- **Temas**, começando pelo Dracula
+- Marca a pasta como confiável antes de subir o Claude, para o terminal não nascer
+  preso no "do you trust this folder"
 
 ## Rodar
 
@@ -59,8 +64,26 @@ chegam entre o snapshot e a assinatura são perdidos e a tela fica furada.
 | `GET` | `/api/terminals/:id` | detalhe de um terminal |
 | `PATCH` | `/api/terminals/:id` | renomeia `{name}` |
 | `DELETE` | `/api/terminals/:id` | mata o processo e remove |
-| `GET` | `/api/terminals/:id/claude-session` | sessão do Claude detectada + comando de resume |
+| `GET` | `/api/terminals/:id/claude-session` | sessão atual + consumo (contexto, tokens, modelo) |
+| `GET` | `/api/sessions?cwd=…` | histórico de sessões daquele diretório |
+| `GET` | `/api/groups` | as pastas existentes |
 | `WS` | `/ws/:id` | liga ao PTY: replay do scrollback, depois ao vivo |
+
+## De onde vem o "% de uso"
+
+Do **transcript em disco**, não da rede. Cada resposta do Claude Code grava
+`input_tokens`, `output_tokens`, `cache_read_input_tokens`,
+`cache_creation_input_tokens` e `thinking_tokens` no `.jsonl` da sessão. O medidor
+soma isso e calcula a ocupação da janela de contexto — exato, local, e sem
+precisar do token OAuth.
+
+A janela de 1M não dá para distinguir pelo nome do modelo (o transcript grava
+`claude-opus-5` nos dois casos), então ela é inferida pelo consumo observado:
+se a sessão já passou de 200k, a janela só pode ser a estendida.
+
+⚠️ O que isto **não** dá é o **% da cota do plano** — esse denominador não está no
+arquivo. Só a API do provedor tem, e o preço de buscá-la é mandar o Bearer token
+para um endpoint não documentado a cada poucos minutos. Decisão consciente: fora.
 
 ## Armadilhas do Windows que já custaram tempo
 
@@ -69,6 +92,11 @@ chegam entre o snapshot e a assinatura são perdidos e a tela fica furada.
 `%1 não é um aplicativo Win32 válido` (os error 193). Por isso comando que não termina
 em `.exe` passa pelo `%COMSPEC% /C`. Consequência conhecida: o filho do PTY vira o
 `cmd.exe`, então `DELETE` mata o `cmd` e pode deixar o processo neto órfão.
+
+**Sessão-filha herdada mata o transcript.** Se o daemon subir de dentro de um
+Claude Code, ele herda `CLAUDE_CODE_CHILD_SESSION` (e mais 8 variáveis de sessão)
+e repassa aos filhos — que então **não gravam transcript**, esvaziando o histórico
+e o medidor. O spawn remove todas: um terminal do workspace é sessão de topo.
 
 **Assets do xterm.js são versionados aqui, não vêm de CDN.** O pacote virou
 `@xterm/xterm` (v6) e os caminhos antigos do cdnjs dão 404. Além disso, ferramenta
@@ -90,5 +118,5 @@ Fora do recorte por decisão, não por esquecimento:
 
 - Empacotamento desktop (Tauri) — o browser serve; entra só se não servir
 - Layouts e painéis divididos — 1 terminal ativo por vez basta para começar
-- Persistência do workspace entre reinícios do daemon
+- Persistência do workspace (pastas e terminais) entre reinícios do daemon
 - Autenticação — não faz sentido em loopback
