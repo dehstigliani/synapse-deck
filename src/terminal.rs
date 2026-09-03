@@ -2,7 +2,6 @@ use anyhow::{anyhow, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use serde::Serialize;
 use std::io::{Read, Write};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
@@ -17,6 +16,24 @@ const SCROLLBACK_LIMIT: usize = 256 * 1024;
 /// Quantos blocos o canal de distribuição segura antes de descartar os mais antigos.
 const BROADCAST_CAPACITY: usize = 1024;
 
+/// Variáveis que marcam "sou uma sessão-filha de outro Claude Code".
+///
+/// Se o daemon foi iniciado de dentro de um Claude Code, ele herda tudo isso e
+/// repassa aos filhos — e o `CLAUDE_CODE_CHILD_SESSION` faz o Claude **não
+/// gravar o transcript**, que é justamente a matéria-prima do histórico de
+/// sessões e do medidor de contexto. Um terminal do workspace é sessão de topo.
+const INHERITED_SESSION_VARS: [&str; 9] = [
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "CLAUDECODE",
+];
+
 /// Tamanho de leitura do PTY. Blocos maiores reduzem troca de contexto.
 const READ_CHUNK: usize = 8 * 1024;
 
@@ -25,6 +42,7 @@ const READ_CHUNK: usize = 8 * 1024;
 pub struct TerminalInfo {
     pub id: String,
     pub name: String,
+    pub group: String,
     pub cwd: String,
     pub command: String,
     pub alive: bool,
@@ -34,6 +52,8 @@ pub struct TerminalInfo {
 pub struct Terminal {
     pub id: String,
     name: Mutex<String>,
+    /// A "pasta" da sidebar: agrupa terminais para organização.
+    group: Mutex<String>,
     pub cwd: String,
     pub command: String,
     master: Mutex<Box<dyn MasterPty + Send>>,
@@ -47,6 +67,7 @@ impl Terminal {
     /// Abre um PTY, sobe o comando dentro dele e começa a bombear a saída.
     pub fn spawn(
         name: String,
+        group: String,
         cwd: String,
         command: String,
         cols: u16,
@@ -76,6 +97,7 @@ impl Terminal {
         let terminal = Arc::new(Self {
             id: uuid::Uuid::new_v4().to_string(),
             name: Mutex::new(name),
+            group: Mutex::new(group),
             cwd,
             command,
             master: Mutex::new(pair.master),
@@ -156,6 +178,14 @@ impl Terminal {
         *self.name.lock().unwrap() = name;
     }
 
+    pub fn group(&self) -> String {
+        self.group.lock().unwrap().clone()
+    }
+
+    pub fn set_group(&self, group: String) {
+        *self.group.lock().unwrap() = group;
+    }
+
     /// `try_wait` devolvendo `None` significa que o processo ainda está rodando.
     pub fn is_alive(&self) -> bool {
         matches!(self.child.lock().unwrap().try_wait(), Ok(None))
@@ -170,6 +200,7 @@ impl Terminal {
         TerminalInfo {
             id: self.id.clone(),
             name: self.name(),
+            group: self.group(),
             cwd: self.cwd.clone(),
             command: self.command.clone(),
             alive: self.is_alive(),
@@ -194,6 +225,7 @@ fn build_command(command: &str) -> Result<CommandBuilder> {
         builder.arg("/C");
         // A linha inteira vai como um argumento só — é a forma que o `/C` espera.
         builder.arg(command);
+        clear_inherited_session(&mut builder);
         return Ok(builder);
     }
 
@@ -201,7 +233,15 @@ fn build_command(command: &str) -> Result<CommandBuilder> {
     for arg in parts {
         builder.arg(arg);
     }
+    clear_inherited_session(&mut builder);
     Ok(builder)
+}
+
+/// Tira do filho as marcas de sessão herdadas do processo que subiu o daemon.
+fn clear_inherited_session(builder: &mut CommandBuilder) {
+    for variable in INHERITED_SESSION_VARS {
+        builder.env_remove(variable);
+    }
 }
 
 /// Os terminais do workspace, em ordem de criação — a ordem da sidebar.
@@ -214,12 +254,13 @@ impl Registry {
     pub fn create(
         &self,
         name: String,
+        group: String,
         cwd: String,
         command: String,
         cols: u16,
         rows: u16,
     ) -> Result<TerminalInfo> {
-        let terminal = Terminal::spawn(name, cwd, command, cols, rows)?;
+        let terminal = Terminal::spawn(name, group, cwd, command, cols, rows)?;
         let info = terminal.info();
         self.terminals.lock().unwrap().push(terminal);
         Ok(info)
@@ -243,10 +284,28 @@ impl Registry {
             .map(Arc::clone)
     }
 
-    pub fn rename(&self, id: &str, name: String) -> Option<TerminalInfo> {
+    /// Renomeia e/ou move de pasta. Campo ausente fica como está.
+    pub fn update(&self, id: &str, name: Option<String>, group: Option<String>) -> Option<TerminalInfo> {
         let terminal = self.get(id)?;
-        terminal.rename(name);
+        if let Some(name) = name {
+            terminal.rename(name);
+        }
+        if let Some(group) = group {
+            terminal.set_group(group);
+        }
         Some(terminal.info())
+    }
+
+    /// As pastas existentes, na ordem em que aparecem.
+    pub fn groups(&self) -> Vec<String> {
+        let mut seen: Vec<String> = Vec::new();
+        for terminal in self.terminals.lock().unwrap().iter() {
+            let group = terminal.group();
+            if !seen.contains(&group) {
+                seen.push(group);
+            }
+        }
+        seen
     }
 
     /// Mata o processo e tira o terminal da sidebar.
@@ -259,61 +318,4 @@ impl Registry {
             .retain(|candidate| candidate.id != id);
         Some(())
     }
-}
-
-/// Traduz um diretório de trabalho no slug que o Claude Code usa em
-/// `~/.claude/projects/` — `C:\Users\Andre` vira `C--Users-Andre`.
-pub fn claude_project_slug(cwd: &str) -> String {
-    cwd.chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
-
-/// Descobre o id da sessão mais recente do Claude Code para um diretório.
-///
-/// É a mesma leitura que o slash command `/retomar` faz: o transcript mais novo
-/// naquele projeto é a sessão que aquele terminal está usando.
-pub fn latest_claude_session(cwd: &str) -> Option<String> {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .ok()?;
-    let directory = PathBuf::from(home)
-        .join(".claude")
-        .join("projects")
-        .join(claude_project_slug(cwd));
-
-    let mut newest: Option<(std::time::SystemTime, String)> = None;
-    for entry in std::fs::read_dir(directory).ok()? {
-        let Ok(entry) = entry else { continue };
-        let path = entry.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        let Ok(modified) = metadata.modified() else {
-            continue;
-        };
-        let Some(session_id) = path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().to_string())
-        else {
-            continue;
-        };
-        if newest
-            .as_ref()
-            .map_or(true, |(previous, _)| modified > *previous)
-        {
-            newest = Some((modified, session_id));
-        }
-    }
-
-    newest.map(|(_, session_id)| session_id)
 }

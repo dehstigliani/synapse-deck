@@ -1,22 +1,27 @@
+mod claude;
 mod terminal;
 
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        Path, Query, State,
     },
     http::StatusCode,
     response::IntoResponse,
     routing::get,
     Json, Router,
 };
+use claude::{SessionSummary, SessionUsage};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use terminal::{latest_claude_session, Registry, Terminal, TerminalInfo};
+use terminal::{Registry, Terminal, TerminalInfo};
 use tower_http::services::ServeDir;
 
 /// Porta do daemon. Só escuta em loopback: nada deste workspace vai para a rede.
 const LISTEN_ADDRESS: &str = "127.0.0.1:7788";
+
+/// Nome da pasta usada quando o terminal não declara nenhuma.
+const DEFAULT_GROUP: &str = "Geral";
 
 /// O que o browser manda pelo WebSocket.
 #[derive(Deserialize)]
@@ -31,25 +36,42 @@ enum ClientMessage {
 #[derive(Deserialize)]
 struct CreateRequest {
     name: String,
-    /// Diretório do terminal. Ausente = diretório onde o daemon subiu.
+    /// A "pasta" da sidebar.
+    group: Option<String>,
     cwd: Option<String>,
-    /// Comando a rodar. Ausente = shell padrão.
     command: Option<String>,
     cols: Option<u16>,
     rows: Option<u16>,
+    /// Sessão a retomar: vira `claude --resume <id>`.
+    resume: Option<String>,
+    /// Marcar a pasta como confiável antes de subir o Claude. Padrão: sim.
+    trust: Option<bool>,
 }
 
 #[derive(Deserialize)]
-struct RenameRequest {
-    name: String,
+struct UpdateRequest {
+    name: Option<String>,
+    group: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CwdQuery {
+    cwd: String,
 }
 
 #[derive(Serialize)]
-struct ClaudeSessionResponse {
-    /// Id da sessão do Claude Code detectada para o diretório do terminal.
-    session_id: Option<String>,
-    /// Comando pronto para retomar essa sessão.
-    resume_command: Option<String>,
+struct CreateResponse {
+    #[serde(flatten)]
+    terminal: TerminalInfo,
+    /// Se a pasta precisou ser marcada como confiável agora.
+    trusted_now: bool,
+}
+
+#[derive(Serialize)]
+struct TerminalSession {
+    session: Option<SessionSummary>,
+    /// Atalho para a sidebar não ter que cavar dentro de `session`.
+    usage: Option<SessionUsage>,
 }
 
 #[tokio::main]
@@ -60,9 +82,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/terminals", get(list_terminals).post(create_terminal))
         .route(
             "/api/terminals/:id",
-            get(get_terminal).patch(rename_terminal).delete(kill_terminal),
+            get(get_terminal).patch(update_terminal).delete(kill_terminal),
         )
-        .route("/api/terminals/:id/claude-session", get(claude_session))
+        .route("/api/terminals/:id/claude-session", get(terminal_session))
+        .route("/api/groups", get(list_groups))
+        .route("/api/sessions", get(list_sessions))
         .route("/ws/:id", get(attach_terminal))
         .fallback_service(ServeDir::new("web"))
         .with_state(registry);
@@ -78,6 +102,15 @@ async fn list_terminals(State(registry): State<Arc<Registry>>) -> Json<Vec<Termi
     Json(registry.list())
 }
 
+async fn list_groups(State(registry): State<Arc<Registry>>) -> Json<Vec<String>> {
+    Json(registry.groups())
+}
+
+/// Histórico de sessões do Claude Code num diretório — alimenta o painel de sessões.
+async fn list_sessions(Query(query): Query<CwdQuery>) -> Json<Vec<SessionSummary>> {
+    Json(claude::list_sessions(&query.cwd))
+}
+
 async fn get_terminal(
     Path(id): Path<String>,
     State(registry): State<Arc<Registry>>,
@@ -91,33 +124,56 @@ async fn get_terminal(
 async fn create_terminal(
     State(registry): State<Arc<Registry>>,
     Json(request): Json<CreateRequest>,
-) -> Result<Json<TerminalInfo>, (StatusCode, String)> {
+) -> Result<Json<CreateResponse>, (StatusCode, String)> {
     let cwd = request.cwd.unwrap_or_else(|| {
         std::env::current_dir()
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_else(|_| ".".to_string())
     });
-    let command = request.command.unwrap_or_else(default_shell);
 
-    registry
+    let command = match (request.command, request.resume) {
+        // Retomar uma sessão do histórico é só um `claude` com argumento.
+        (_, Some(session)) => format!("claude --resume {session}"),
+        (Some(command), None) => command,
+        (None, None) => default_shell(),
+    };
+
+    // Marca a pasta como confiável antes de subir, senão o Claude abre no
+    // "do you trust this folder" e o terminal nasce esperando resposta.
+    let wants_trust = request.trust.unwrap_or(true);
+    let trusted_now = if wants_trust && command.contains("claude") {
+        claude::trust_directory(&cwd).unwrap_or(false)
+    } else {
+        false
+    };
+
+    let terminal = registry
         .create(
             request.name,
+            request
+                .group
+                .filter(|group| !group.trim().is_empty())
+                .unwrap_or_else(|| DEFAULT_GROUP.to_string()),
             cwd,
             command,
             request.cols.unwrap_or(120),
             request.rows.unwrap_or(30),
         )
-        .map(Json)
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+
+    Ok(Json(CreateResponse {
+        terminal,
+        trusted_now,
+    }))
 }
 
-async fn rename_terminal(
+async fn update_terminal(
     Path(id): Path<String>,
     State(registry): State<Arc<Registry>>,
-    Json(request): Json<RenameRequest>,
+    Json(request): Json<UpdateRequest>,
 ) -> Result<Json<TerminalInfo>, StatusCode> {
     registry
-        .rename(&id, request.name)
+        .update(&id, request.name, request.group)
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
 }
@@ -132,23 +188,15 @@ async fn kill_terminal(
     }
 }
 
-/// Diz qual sessão do Claude Code corresponde ao diretório deste terminal.
-///
-/// É a ponte com o `claude-session-index`: o terminal sabe em que sessão está,
-/// então dá para retomá-la depois sem caçar UUID na mão.
-async fn claude_session(
+/// Em que sessão do Claude Code este terminal está, e quanto ela já consumiu.
+async fn terminal_session(
     Path(id): Path<String>,
     State(registry): State<Arc<Registry>>,
-) -> Result<Json<ClaudeSessionResponse>, StatusCode> {
+) -> Result<Json<TerminalSession>, StatusCode> {
     let found = registry.get(&id).ok_or(StatusCode::NOT_FOUND)?;
-    let session_id = latest_claude_session(&found.cwd);
-    let resume_command = session_id
-        .as_ref()
-        .map(|session| format!("claude --resume {session}"));
-    Ok(Json(ClaudeSessionResponse {
-        session_id,
-        resume_command,
-    }))
+    let session = claude::latest_session(&found.cwd);
+    let usage = session.as_ref().map(|summary| summary.usage.clone());
+    Ok(Json(TerminalSession { session, usage }))
 }
 
 async fn attach_terminal(
