@@ -1,6 +1,7 @@
-# rust-pty-terminal-workspace
+# Synapse Deck
 
-Workspace de terminais nomeados com PTY em Rust, integrado ao Claude Code.
+**O deck de terminais e agentes.** Vários terminais nomeados, cada um num PTY de
+verdade, com o Claude Code rodando dentro e sobrevivendo ao fechar da janela.
 
 Projeto pessoal. Zona 🎓 **escola** — o retorno é aprender Rust e a camada de PTY.
 Não é produto e não tem receita prevista.
@@ -24,7 +25,16 @@ Não é produto e não tem receita prevista.
 - Marca a pasta como confiável antes de subir o Claude, para o terminal não nascer
   preso no "do you trust this folder"
 
-## Rodar
+## Instalar
+
+Baixe o pacote do seu sistema em
+[Releases](https://github.com/dehstigliani/synapse-deck/releases) e rode o binário.
+Ele é autocontido — a interface vai embutida — então roda de qualquer diretório.
+
+⚠️ Os binários **não são assinados**: o SmartScreen do Windows avisa na primeira
+execução e o macOS não está notarizado.
+
+## Rodar do código
 
 ```bash
 cargo run

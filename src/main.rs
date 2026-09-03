@@ -6,16 +6,22 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
-    http::StatusCode,
+    http::{header, StatusCode, Uri},
     response::IntoResponse,
     routing::get,
     Json, Router,
 };
+use rust_embed::RustEmbed;
 use claude::{SessionSummary, SessionUsage};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use terminal::{Registry, Terminal, TerminalInfo};
-use tower_http::services::ServeDir;
+
+/// A interface inteira vai dentro do binário: um release é um arquivo só, e o
+/// programa roda de qualquer diretório em vez de exigir a pasta `web/` ao lado.
+#[derive(RustEmbed)]
+#[folder = "web/"]
+struct WebAssets;
 
 /// Porta do daemon. Só escuta em loopback: nada deste workspace vai para a rede.
 const LISTEN_ADDRESS: &str = "127.0.0.1:7788";
@@ -103,18 +109,37 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/terminals/:id/claude-session", get(terminal_session))
         .route("/api/groups", get(list_groups))
         .route("/api/usage", get(usage_report))
+        .route("/api/usage/pulse", get(usage_pulse))
         .route("/api/sessions/by-boot", get(sessions_by_boot))
         .route("/api/sessions/active", get(active_sessions))
         .route("/api/sessions", get(list_sessions))
         .route("/ws/:id", get(attach_terminal))
-        .fallback_service(ServeDir::new("web"))
+        .fallback(serve_asset)
         .with_state(registry);
 
     let listener = tokio::net::TcpListener::bind(LISTEN_ADDRESS).await?;
-    println!("workspace no ar em http://{LISTEN_ADDRESS}");
+    println!("Synapse Deck no ar em http://{LISTEN_ADDRESS}");
     println!("os terminais sobrevivem ao fechar o browser — feche a janela e volte");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Serve a interface embutida no binário.
+async fn serve_asset(uri: Uri) -> impl IntoResponse {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+
+    match WebAssets::get(path) {
+        Some(file) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            (
+                [(header::CONTENT_TYPE, mime.as_ref().to_string())],
+                file.data.into_owned(),
+            )
+                .into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "não encontrado").into_response(),
+    }
 }
 
 async fn list_terminals(State(registry): State<Arc<Registry>>) -> Json<Vec<TerminalInfo>> {
@@ -133,6 +158,11 @@ async fn list_sessions(Query(query): Query<CwdQuery>) -> Json<Vec<SessionSummary
 /// Consumo agregado de todos os projetos: totais, por dia e por projeto.
 async fn usage_report(Query(query): Query<UsageQuery>) -> Json<claude::UsageReport> {
     Json(claude::usage_report(query.days.unwrap_or(14)))
+}
+
+/// Quanto foi consumido na ultima hora, na janela de 5h e na semana.
+async fn usage_pulse() -> Json<claude::UsagePulse> {
+    Json(claude::usage_pulse())
 }
 
 /// Sessoes agrupadas pelo boot do Windows em que estavam vivas.

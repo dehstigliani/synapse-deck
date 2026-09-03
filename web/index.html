@@ -3,26 +3,27 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>PTY Terminal Workspace</title>
+<title>Synapse Deck</title>
 <link rel="stylesheet" href="/vendor/xterm.css" />
 <style>
   /* As cores vivem em variáveis para o tema poder trocar tudo de uma vez. */
   :root {
-    --bg: #282a36;
-    --sidebar: #21222c;
-    --panel: #21222c;
-    --border: #44475a;
-    --text: #f8f8f2;
-    --muted: #6272a4;
-    --accent: #bd93f9;
-    --accent-soft: #44475a;
-    --alive: #50fa7b;
-    --dead: #6272a4;
-    --warn: #ffb86c;
-    --danger: #ff5555;
+    --bg: #0c0e13;
+    --sidebar: #161a25;
+    --panel: #161a25;
+    --border: #252a3b;
+    --text: #ebecf4;
+    --muted: #8a90ad;
+    --accent: #f37035;
+    --accent-soft: #252a3b;
+    --alive: #01d5bf;
+    --dead: #a3a3a3;
+    --warn: #f0b100;
+    --danger: #ff6baa;
   }
   * { box-sizing: border-box; }
   body {
+    color-scheme: dark light;
     margin: 0;
     height: 100vh;
     display: grid;
@@ -164,6 +165,14 @@
   }
   .topbar button.ghost:hover { color: var(--text); border-color: var(--accent); }
 
+  /* pulso de consumo na navbar */
+  .pulse { display: flex; align-items: center; gap: 7px; }
+  .pulse .label { color: var(--muted); }
+  .pulse .value { color: var(--text); }
+  .pulse .sep { color: var(--border); }
+  .pulse .bar { display: block; width: 54px; height: 6px; background: var(--accent-soft); border-radius: 3px; overflow: hidden; }
+  .pulse .fill { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+
   /* medidor de contexto */
   .meter { display: flex; align-items: center; gap: 7px; }
   .meter .bar {
@@ -275,7 +284,7 @@
 <body>
   <aside>
     <div class="brand">
-      Terminais
+      Synapse Deck
       <select id="theme-select" title="tema"></select>
     </div>
     <div class="list" id="list"><div class="empty">nenhum terminal ainda</div></div>
@@ -291,6 +300,14 @@
       <span class="name" id="active-name">—</span>
       <span class="cwd" id="active-cwd"></span>
       <span class="spacer"></span>
+      <span class="pulse" id="pulse" hidden>
+        <span class="label">hora</span>
+        <span class="bar"><span class="fill" id="pulse-fill"></span></span>
+        <span class="value" id="pulse-hour">—</span>
+        <span class="sep">|</span>
+        <span class="label">semana</span>
+        <span class="value" id="pulse-week">—</span>
+      </span>
       <span class="meter" id="meter" hidden>
         <span title="quanto da janela de contexto a sessão já ocupa">contexto</span>
         <span class="bar"><span class="fill" id="meter-fill"></span></span>
@@ -351,9 +368,74 @@ const THEMES = {
       brightCyan: '#a4ffff', brightWhite: '#ffffff',
     },
   },
+
+  // Orange Innovation — identidade Retina/infra sobre a ossatura do Dracula.
+  // Os tokens de marca são os reais do design system: laranja #f37035, ciano de
+  // destaque #01d5bf e a pilha de fundos #0c0e13 → #252a3b. O que o Dracula
+  // empresta é a calibragem da paleta ANSI, que é boa para terminal; os slots
+  // que carregam significado (cursor, ciano, amarelo, azul) vestem a marca.
+  'orange-innovation': {
+    label: 'Orange Innovation',
+    ui: {
+      '--bg': '#0c0e13',
+      '--sidebar': '#161a25',
+      '--panel': '#161a25',
+      '--border': '#252a3b',
+      '--text': '#ebecf4',
+      // Derivado entre icons-secondary (#adb2cf) e background-4 (#3a4058):
+      // o token cheio brilha demais como texto secundário sobre #0c0e13.
+      '--muted': '#8a90ad',
+      '--accent': '#f37035',
+      '--accent-soft': '#252a3b',
+      '--alive': '#01d5bf',
+      '--dead': '#a3a3a3',
+      '--warn': '#f0b100',
+      '--danger': '#ff6baa',
+    },
+    xterm: {
+      background: '#0c0e13', foreground: '#ebecf4',
+      cursor: '#f37035', cursorAccent: '#0c0e13', selectionBackground: '#252a3b',
+      black: '#1e222f', red: '#ff6baa', green: '#50fa7b', yellow: '#f0b100',
+      blue: '#219cb5', magenta: '#ff79c6', cyan: '#01d5bf', white: '#ebecf4',
+      brightBlack: '#3a4058', brightRed: '#ff8fc0', brightGreen: '#69ff94',
+      brightYellow: '#ffd700', brightBlue: '#35c0dc', brightMagenta: '#ff92df',
+      brightCyan: '#4ff0dd', brightWhite: '#ffffff',
+    },
+  },
+
+  // Draculight — o claro da casa, construído sobre o Alucard, que é o tema claro
+  // oficial do Dracula (o nome é Dracula ao contrário). O fundo creme #fffbeb
+  // cansa menos que branco puro, e o laranja da marca entra no lugar do roxo
+  // para o par escuro/claro compartilhar a mesma cor de destaque.
+  draculight: {
+    label: 'Draculight',
+    ui: {
+      '--bg': '#fffbeb',
+      '--sidebar': '#f5f0dc',
+      '--panel': '#f5f0dc',
+      '--border': '#dcd7c0',
+      '--text': '#1f1f1f',
+      '--muted': '#6c664b',
+      '--accent': '#c25316',
+      '--accent-soft': '#e8e2ca',
+      '--alive': '#14710a',
+      '--dead': '#9a9585',
+      '--warn': '#a34d14',
+      '--danger': '#cb3a2a',
+    },
+    xterm: {
+      background: '#fffbeb', foreground: '#1f1f1f',
+      cursor: '#c25316', cursorAccent: '#fffbeb', selectionBackground: '#cfcfde',
+      black: '#1f1f1f', red: '#cb3a2a', green: '#14710a', yellow: '#846e15',
+      blue: '#644ac9', magenta: '#a3144d', cyan: '#036a96', white: '#e8e2ca',
+      brightBlack: '#6c664b', brightRed: '#e35f4f', brightGreen: '#2a9c1e',
+      brightYellow: '#a38a1f', brightBlue: '#7d63e0', brightMagenta: '#c2246a',
+      brightCyan: '#0587bd', brightWhite: '#fffbeb',
+    },
+  },
 };
 
-let currentTheme = localStorage.getItem('theme') || 'dracula';
+let currentTheme = localStorage.getItem('theme') || 'orange-innovation';
 
 function applyTheme(key) {
   const theme = THEMES[key];
@@ -371,6 +453,9 @@ function applyTheme(key) {
 const panes = new Map();
 let activeId = null;
 let terminals = [];
+/// Enquanto um campo de nome está aberto, a sidebar não se redesenha —
+/// senão o poll periódico apaga o que está sendo digitado.
+let editing = false;
 const collapsedGroups = new Set();
 
 const listEl = document.getElementById('list');
@@ -404,6 +489,7 @@ async function refresh() {
 }
 
 function renderSidebar() {
+  if (editing) return;
   listEl.textContent = '';
   if (!terminals.length) {
     const empty = document.createElement('div');
@@ -488,6 +574,7 @@ function renderItem(item) {
 
 /// Edita nome ou pasta no lugar, sem caixa de diálogo.
 function startInlineEdit(row, label, item, field) {
+  editing = true;
   const input = document.createElement('input');
   input.value = item[field];
   input.placeholder = field === 'group' ? 'nome da pasta' : 'nome do terminal';
@@ -496,17 +583,54 @@ function startInlineEdit(row, label, item, field) {
   input.select();
   input.onclick = (event) => event.stopPropagation();
 
+  let done = false;
   const commit = async () => {
+    if (done) return;
+    done = true;
     const value = input.value.trim();
+    editing = false;
     if (value && value !== item[field]) {
       await api(`/terminals/${item.id}`, { method: 'PATCH', body: JSON.stringify({ [field]: value }) });
     }
     await refresh();
   };
+  const cancel = () => {
+    if (done) return;
+    done = true;
+    editing = false;
+    refresh();
+  };
   input.onblur = commit;
   input.onkeydown = (event) => {
     if (event.key === 'Enter') commit();
-    if (event.key === 'Escape') refresh();
+    if (event.key === 'Escape') cancel();
+  };
+}
+
+/// Pede o nome da pasta na própria sidebar, sem caixa de diálogo do browser.
+function promptForGroup() {
+  editing = true;
+  const row = document.createElement('div');
+  row.className = 'item';
+  const input = document.createElement('input');
+  input.placeholder = 'nome da pasta';
+  row.append(input);
+  listEl.prepend(row);
+  input.focus();
+
+  let done = false;
+  const finish = (name) => {
+    if (done) return;
+    done = true;
+    editing = false;
+    row.remove();
+    if (name) createTerminal('shell', name);
+    else refresh();
+  };
+  input.onblur = () => finish(input.value.trim());
+  input.onkeydown = (event) => {
+    if (event.key === 'Enter') finish(input.value.trim());
+    if (event.key === 'Escape') finish(null);
   };
 }
 
@@ -577,6 +701,31 @@ async function activate(id) {
 }
 
 const activeTerminal = () => terminals.find((item) => item.id === activeId);
+
+// ---------------------------------------------------------------- pulso
+/// Consumo recente na navbar: a última hora, a janela de 5h e a semana.
+///
+/// A porcentagem compara a hora atual com a **hora mais cheia já registrada**,
+/// não com a cota do plano — esse número não existe nos arquivos locais.
+async function updatePulse() {
+  const pulse = await api('/usage/pulse');
+  const box = document.getElementById('pulse');
+  document.getElementById('pulse-hour').textContent =
+    `${formatTokens(pulse.tokens_last_hour)} · ${pulse.hour_percent.toFixed(0)}%`;
+  document.getElementById('pulse-week').textContent = formatTokens(pulse.tokens_last_week);
+
+  const fill = document.getElementById('pulse-fill');
+  fill.style.width = `${Math.min(pulse.hour_percent, 100)}%`;
+
+  box.title =
+    `última hora: ${formatTokens(pulse.tokens_last_hour)} tokens\n` +
+    `janela de 5h: ${formatTokens(pulse.tokens_last_5h)}\n` +
+    `últimos 7 dias: ${formatTokens(pulse.tokens_last_week)}\n` +
+    `hora mais cheia já registrada: ${formatTokens(pulse.peak_hour_tokens)}\n\n` +
+    `A % compara com o seu próprio pico, não com a cota do plano — ` +
+    `o limite do plano não está nos arquivos locais.`;
+  box.hidden = false;
+}
 
 // ---------------------------------------------------------------- uso
 async function updateTopbar() {
@@ -796,11 +945,8 @@ async function createTerminal(kind, group) {
 
 document.getElementById('new-claude').onclick = () => createTerminal('claude');
 document.getElementById('new-shell').onclick = () => createTerminal('shell');
-document.getElementById('new-group').onclick = () => {
-  // Pasta nasce junto com o primeiro terminal dela.
-  const name = `pasta-${new Set(terminals.map((item) => item.group)).size + 1}`;
-  createTerminal('shell', name);
-};
+// A pasta nasce junto com o primeiro terminal dela, com o nome que você escolher.
+document.getElementById('new-group').onclick = promptForGroup;
 
 document.getElementById('toggle-panel').onclick = () => {
   document.body.classList.toggle('with-panel');
@@ -828,6 +974,8 @@ window.addEventListener('resize', () => {
 
 // O daemon é a fonte de verdade: repescar mostra terminal que morreu sozinho.
 setInterval(() => refresh().catch(() => {}), 4000);
+updatePulse().catch(() => {});
+setInterval(() => updatePulse().catch(() => {}), 60000);
 refresh().catch((error) => {
   placeholderEl.textContent = `daemon não respondeu: ${error.message}`;
 });

@@ -1,0 +1,12 @@
+# Índice em LF, árvore de trabalho no formato nativo do sistema.
+# Sem isto o Git avisa a cada commit no Windows e o diff infla com CRLF.
+* text=auto
+
+*.rs      text diff=rust
+*.toml    text
+*.md      text
+*.html    text diff=html
+*.yml     text
+
+# Biblioteca de terceiro: fora das estatísticas de linguagem do GitHub.
+web/vendor/** linguist-vendored

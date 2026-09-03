@@ -47,6 +47,12 @@ pub struct SessionSummary {
     pub message_count: usize,
     pub usage: SessionUsage,
     pub resume_command: String,
+    /// Tokens por hora do relógio, para o pulso da navbar.
+    ///
+    /// Fica fora do JSON: é detalhe interno, e serializar isso em toda listagem
+    /// de sessão engordaria a resposta à toa.
+    #[serde(skip)]
+    pub hourly: Vec<(u64, u64)>,
 }
 
 /// Traduz um diretório de trabalho no slug que o Claude Code usa em
@@ -110,14 +116,18 @@ pub fn read_session(path: &Path) -> Option<SessionSummary> {
         .duration_since(UNIX_EPOCH)
         .ok()?
         .as_secs();
-
     let content = fs::read_to_string(path).ok()?;
+    Some(parse_session(id, modified, &content))
+}
 
+/// O miolo da leitura, separado do disco para poder ser testado.
+pub fn parse_session(id: String, modified: u64, content: &str) -> SessionSummary {
     let mut title = String::new();
     let mut last_message = String::new();
     let mut message_count = 0usize;
     let mut usage = SessionUsage::default();
     let mut peak_context = 0u64;
+    let mut hourly: HashMap<u64, u64> = HashMap::new();
 
     for line in content.lines() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else {
@@ -173,6 +183,16 @@ pub fn read_session(path: &Path) -> Option<SessionSummary> {
                 let context = input + cache_read + cache_creation;
                 usage.context_tokens = context;
                 peak_context = peak_context.max(context);
+
+                // Balde da hora cheia em que a resposta foi gravada.
+                if let Some(at) = entry
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .and_then(parse_timestamp)
+                {
+                    let processed = context + number("output_tokens");
+                    *hourly.entry(at / 3_600 * 3_600).or_insert(0) += processed;
+                }
             }
             _ => {}
         }
@@ -186,7 +206,8 @@ pub fn read_session(path: &Path) -> Option<SessionSummary> {
     usage.context_percent =
         (usage.context_tokens as f64 / usage.context_limit as f64 * 100.0).min(100.0);
 
-    Some(SessionSummary {
+    SessionSummary {
+        hourly: hourly.into_iter().collect(),
         resume_command: format!("claude --resume {id}"),
         id,
         title: truncate(&title, 120),
@@ -194,7 +215,7 @@ pub fn read_session(path: &Path) -> Option<SessionSummary> {
         modified,
         message_count,
         usage,
-    })
+    }
 }
 
 fn truncate(text: &str, limit: usize) -> String {
@@ -443,6 +464,34 @@ pub struct UsageReport {
     pub by_project: Vec<ProjectUsage>,
 }
 
+/// Dias desde a época a partir da data civil (Howard Hinnant) — o inverso de `day_of`.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let shifted_month = (month + 9) % 12;
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// Converte `2026-09-03T17:16:17.679Z` em segundos desde a época.
+///
+/// O Claude Code sempre grava em UTC com esse formato fixo, então a leitura por
+/// posição é suficiente e evita trazer uma biblioteca de data só para isto.
+fn parse_timestamp(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 19 || bytes[4] != b'-' || bytes[10] != b'T' {
+        return None;
+    }
+    let number = |from: usize, to: usize| text.get(from..to)?.parse::<i64>().ok();
+    let seconds = days_from_civil(number(0, 4)?, number(5, 7)?, number(8, 10)?) * 86_400
+        + number(11, 13)? * 3_600
+        + number(14, 16)? * 60
+        + number(17, 19)?;
+    u64::try_from(seconds).ok()
+}
+
 /// Data civil a partir do epoch, sem dependência externa (Howard Hinnant).
 fn day_of(epoch_seconds: u64) -> String {
     let days = (epoch_seconds / 86_400) as i64;
@@ -553,10 +602,12 @@ pub struct BootGroup {
     pub sessions: Vec<SessionSummary>,
 }
 
-/// Momentos de boot do Windows, do mais recente para o mais antigo.
+/// Momentos de boot da máquina, do mais recente para o mais antigo.
 ///
-/// O evento 6005 do log de sistema é o marcador de boot. A consulta é lenta,
-/// então o resultado fica em cache por 15 minutos no processo.
+/// Só o Windows entrega **histórico**: o evento 6005 do log de sistema marca
+/// cada inicialização. Linux e macOS expõem apenas o boot atual, então lá a
+/// lista tem no máximo um item — e a aba Boot vira "desde que a máquina ligou".
+/// O resultado fica em cache por 15 minutos porque a consulta é lenta.
 fn boot_times(limit: usize) -> Vec<u64> {
     static BOOT_CACHE: Mutex<Option<(u64, Vec<u64>)>> = Mutex::new(None);
     let now = SystemTime::now()
@@ -570,14 +621,20 @@ fn boot_times(limit: usize) -> Vec<u64> {
         }
     }
 
+    let boots = read_boot_times(limit);
+    *BOOT_CACHE.lock().unwrap() = Some((now, boots.clone()));
+    boots
+}
+
+/// Windows guarda o histórico de inicializações no log de eventos.
+#[cfg(windows)]
+fn read_boot_times(limit: usize) -> Vec<u64> {
     let script = format!(
         "Get-WinEvent -FilterHashtable @{{LogName='System';ID=6005}} -MaxEvents {limit} -ErrorAction SilentlyContinue | ForEach-Object {{ [DateTimeOffset]::new($_.TimeCreated.ToUniversalTime(), [TimeSpan]::Zero).ToUnixTimeSeconds() }}"
     );
-    let output = std::process::Command::new("powershell")
+    std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output();
-
-    let boots: Vec<u64> = output
+        .output()
         .ok()
         .map(|out| {
             String::from_utf8_lossy(&out.stdout)
@@ -585,10 +642,41 @@ fn boot_times(limit: usize) -> Vec<u64> {
                 .filter_map(|line| line.trim().parse::<u64>().ok())
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
 
-    *BOOT_CACHE.lock().unwrap() = Some((now, boots.clone()));
-    boots
+/// O Linux publica o instante do boot atual em `/proc/stat`, na linha `btime`.
+/// Não há histórico: a lista tem no máximo um item.
+#[cfg(target_os = "linux")]
+fn read_boot_times(_limit: usize) -> Vec<u64> {
+    fs::read_to_string("/proc/stat")
+        .ok()
+        .and_then(|content| {
+            content
+                .lines()
+                .find_map(|line| line.strip_prefix("btime ")?.trim().parse::<u64>().ok())
+        })
+        .into_iter()
+        .collect()
+}
+
+/// No macOS o boot atual sai do `sysctl kern.boottime`, no formato
+/// `{ sec = 1788393600, usec = 0 } ...`. Também sem histórico.
+#[cfg(target_os = "macos")]
+fn read_boot_times(_limit: usize) -> Vec<u64> {
+    std::process::Command::new("sysctl")
+        .args(["-n", "kern.boottime"])
+        .output()
+        .ok()
+        .and_then(|out| {
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            let start = text.find("sec = ")? + 6;
+            let rest = &text[start..];
+            let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+            rest[..end].parse::<u64>().ok()
+        })
+        .into_iter()
+        .collect()
 }
 
 /// Agrupa as sessões pelo boot do Windows em que estavam vivas.
@@ -652,4 +740,147 @@ pub fn active_sessions(within_seconds: u64) -> Vec<SessionSummary> {
 
     sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
     sessions
+}
+
+
+
+/// O pulso de consumo: quanto foi gasto agora, na janela de limite e na semana.
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct UsagePulse {
+    pub tokens_last_hour: u64,
+    /// A janela de 5 horas é o ciclo de limite das assinaturas.
+    pub tokens_last_5h: u64,
+    pub tokens_last_week: u64,
+    /// A hora mais cheia já registrada — é o denominador honesto que temos.
+    ///
+    /// ⚠️ Não é a cota do plano: esse número não existe em disco. A porcentagem
+    /// compara o ritmo de agora com o pico do próprio usuário.
+    pub peak_hour_tokens: u64,
+    pub hour_percent: f64,
+}
+
+pub fn usage_pulse() -> UsagePulse {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
+
+    let mut pulse = UsagePulse::default();
+    let mut totals_by_hour: HashMap<u64, u64> = HashMap::new();
+
+    for directory in all_project_directories() {
+        for transcript in transcripts_in(&directory) {
+            let Some(session) = read_session_cached(&transcript) else {
+                continue;
+            };
+            for (hour, tokens) in session.hourly {
+                *totals_by_hour.entry(hour).or_insert(0) += tokens;
+            }
+        }
+    }
+
+    for (hour, tokens) in &totals_by_hour {
+        let age = now.saturating_sub(*hour);
+        if age <= 3_600 {
+            pulse.tokens_last_hour += tokens;
+        }
+        if age <= 5 * 3_600 {
+            pulse.tokens_last_5h += tokens;
+        }
+        if age <= 7 * 86_400 {
+            pulse.tokens_last_week += tokens;
+        }
+        pulse.peak_hour_tokens = pulse.peak_hour_tokens.max(*tokens);
+    }
+
+    if pulse.peak_hour_tokens > 0 {
+        pulse.hour_percent =
+            (pulse.tokens_last_hour as f64 / pulse.peak_hour_tokens as f64 * 100.0).min(100.0);
+    }
+    pulse
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slug_matches_claude_layout() {
+        assert_eq!(
+            project_slug("C:\\Users\\AndreStigliani"),
+            "C--Users-AndreStigliani"
+        );
+    }
+
+    #[test]
+    fn civil_date_from_epoch() {
+        assert_eq!(day_of(0), "1970-01-01");
+        // 2026-09-03T00:00:00Z — conferido contra o calendário, não estimado.
+        assert_eq!(day_of(1_788_393_600), "2026-09-03");
+        // A véspera do mesmo instante, para pegar erro de arredondamento de dia.
+        assert_eq!(day_of(1_788_393_599), "2026-09-02");
+    }
+
+    #[test]
+    fn timestamp_round_trips_with_day_of() {
+        let at = parse_timestamp("2026-09-03T17:16:17.679Z").expect("data válida");
+        assert_eq!(day_of(at), "2026-09-03");
+        // Meia-noite em UTC tem que bater exatamente com o epoch conferido.
+        assert_eq!(parse_timestamp("2026-09-03T00:00:00.000Z"), Some(1_788_393_600));
+        assert_eq!(parse_timestamp("nao e data"), None);
+    }
+
+    #[test]
+    fn cost_uses_cache_multipliers() {
+        let usage = SessionUsage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_read_tokens: 1_000_000,
+            cache_creation_tokens: 1_000_000,
+            model: Some("claude-opus-5".to_string()),
+            ..Default::default()
+        };
+        // 5 (entrada) + 25 (saída) + 0,5 (cache lido) + 6,25 (cache escrito)
+        assert!((cost_of(&usage) - 36.75).abs() < 1e-9);
+    }
+
+    fn fixture() -> String {
+        [
+            r#"{"type":"user","message":{"content":"primeira pergunta"}}"#,
+            r#"{"type":"user","message":{"content":"<system-reminder>ignorar</system-reminder>"}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":300000,"cache_creation_input_tokens":100,"output_tokens_details":{"thinking_tokens":7}}}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"text","text":"segunda pergunta"}]}}"#,
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn parses_title_and_skips_injected_messages() {
+        let session = parse_session("abc".to_string(), 0, &fixture());
+        assert_eq!(session.title, "primeira pergunta");
+        assert_eq!(session.last_message, "segunda pergunta");
+        // A mensagem que começa com "<" não conta como conversa.
+        assert_eq!(session.message_count, 2);
+        assert_eq!(session.resume_command, "claude --resume abc");
+    }
+
+    #[test]
+    fn sums_usage_and_infers_extended_window() {
+        let session = parse_session("abc".to_string(), 0, &fixture());
+        let usage = &session.usage;
+        assert_eq!(usage.output_tokens, 20);
+        assert_eq!(usage.thinking_tokens, 7);
+        assert_eq!(usage.model.as_deref(), Some("claude-opus-5"));
+        // O contexto vivo é o prompt da última resposta.
+        assert_eq!(usage.context_tokens, 10 + 300_000 + 100);
+        // Passou de 200k, logo a janela só pode ser a estendida.
+        assert_eq!(usage.context_limit, EXTENDED_CONTEXT_LIMIT);
+    }
+
+    #[test]
+    fn empty_transcript_does_not_panic() {
+        let session = parse_session("vazia".to_string(), 0, "");
+        assert_eq!(session.message_count, 0);
+        assert_eq!(session.usage.context_limit, DEFAULT_CONTEXT_LIMIT);
+    }
 }
