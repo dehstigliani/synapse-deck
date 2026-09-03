@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Synapse Deck</title>
+<link rel="icon" href="/assets/favicon.ico" />
 <link rel="stylesheet" href="/vendor/xterm.css" />
 <style>
   /* As cores vivem em variáveis para o tema poder trocar tudo de uma vez. */
@@ -54,6 +55,7 @@
     align-items: center;
     gap: 8px;
   }
+  .brand .mark { width: 20px; height: 20px; flex: none; }
   .brand select {
     margin-left: auto;
     background: var(--bg);
@@ -287,6 +289,7 @@
 <body>
   <aside>
     <div class="brand">
+      <img class="mark" src="/assets/mark.png" alt="" />
       Synapse Deck
       <select id="theme-select" title="tema"></select>
     </div>
