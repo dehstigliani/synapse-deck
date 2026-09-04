@@ -413,21 +413,20 @@ const THEMES = {
     },
   },
 
-  // Orange Innovation — identidade Retina/infra sobre a ossatura do Dracula.
-  // Os tokens de marca são os reais do design system: laranja #f37035, ciano de
-  // destaque #01d5bf e a pilha de fundos #0c0e13 → #252a3b. O que o Dracula
-  // empresta é a calibragem da paleta ANSI, que é boa para terminal; os slots
-  // que carregam significado (cursor, ciano, amarelo, azul) vestem a marca.
-  'orange-innovation': {
-    label: 'Orange Innovation',
+  // Ember — laranja quente sobre fundo frio e profundo, com ciano no lugar do
+  // verde para o que está vivo. A ossatura ANSI vem do Dracula, que é bem
+  // calibrada para terminal; os slots que carregam significado (cursor, ciano,
+  // amarelo, azul) recebem as cores próprias do tema.
+  ember: {
+    label: 'Ember',
     ui: {
       '--bg': '#0c0e13',
       '--sidebar': '#161a25',
       '--panel': '#161a25',
       '--border': '#252a3b',
       '--text': '#ebecf4',
-      // Derivado entre icons-secondary (#adb2cf) e background-4 (#3a4058):
-      // o token cheio brilha demais como texto secundário sobre #0c0e13.
+      // Entre o texto secundário e a borda: os dois extremos brilham demais
+      // ou de menos como rótulo sobre #0c0e13.
       '--muted': '#8a90ad',
       '--accent': '#f37035',
       '--accent-soft': '#252a3b',
@@ -479,7 +478,7 @@ const THEMES = {
   },
 };
 
-let currentTheme = localStorage.getItem('theme') || 'orange-innovation';
+let currentTheme = localStorage.getItem('theme') || 'ember';
 
 function applyTheme(key) {
   const theme = THEMES[key];
