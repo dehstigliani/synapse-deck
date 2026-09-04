@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const REPO: &str = "dehstigliani/synapse-deck";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -146,6 +146,50 @@ pub fn compare_versions(left: &str, right: &str) -> Ordering {
     }
 }
 
+/// Traduz a falha do GitHub para algo que diga a verdade ao usuário.
+///
+/// O 403 é ambíguo, e a diferença importa: sem autenticação a API permite 60
+/// consultas por hora **por endereço IP**, e ao estourar ela responde 403 igual
+/// a uma negativa de permissão. Mandar alguém configurar token quando o problema
+/// é limite de requisições empurra para o caminho errado — ainda mais com o
+/// repositório público, onde token nem se aplica.
+fn explain_failure(error: ureq::Error) -> anyhow::Error {
+    let ureq::Error::Status(status, ref response) = error else {
+        return anyhow!(error.to_string());
+    };
+
+    let restantes = response
+        .header("x-ratelimit-remaining")
+        .and_then(|valor| valor.parse::<u64>().ok());
+
+    if status == 403 && restantes == Some(0) {
+        let quando = response
+            .header("x-ratelimit-reset")
+            .and_then(|valor| valor.parse::<u64>().ok())
+            .map(|reset| {
+                let agora = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                format!(" Tente de novo em {} min.", reset.saturating_sub(agora).div_ceil(60))
+            })
+            .unwrap_or_default();
+        return anyhow!("limite de consultas da API do GitHub atingido para esta rede.{quando}");
+    }
+
+    match status {
+        404 => anyhow!(
+            "repositório ou releases não encontrados — se ele for privado, grave um \
+             token de leitura no arquivo indicado no README"
+        ),
+        401 | 403 => anyhow!(
+            "acesso negado pelo GitHub — se o repositório for privado, grave um token \
+             de leitura no arquivo indicado no README"
+        ),
+        outro => anyhow!("o GitHub respondeu {outro}"),
+    }
+}
+
 /// Descobre o release mais novo, **incluindo pré-lançamentos**.
 ///
 /// ⚠️ `/releases/latest` do GitHub ignora pré-lançamento e devolve 404 quando só
@@ -155,17 +199,7 @@ fn newest_release() -> Result<Value> {
     let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=20");
     let releases: Value = request(&url)
         .call()
-        .map_err(|error| match error {
-            ureq::Error::Status(404, _) => anyhow!(
-                "repositório ou releases inacessíveis — se for privado, defina \
-                 SYNAPSE_DECK_GITHUB_TOKEN"
-            ),
-            ureq::Error::Status(401 | 403, _) => anyhow!(
-                "acesso negado ao repositório — defina SYNAPSE_DECK_GITHUB_TOKEN \
-                 com um token que enxergue este repositório"
-            ),
-            other => anyhow!(other.to_string()),
-        })?
+        .map_err(explain_failure)?
         .into_json()
         .context("resposta ilegível do GitHub")?;
 

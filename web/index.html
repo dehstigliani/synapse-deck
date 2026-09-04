@@ -180,6 +180,25 @@
     padding: 3px 8px;
   }
   .topbar button.ghost:hover { color: var(--text); border-color: var(--accent); }
+  /* Estado ligado: sem isto, nada indica que o botão é um interruptor. */
+  .topbar button.ghost.on { color: var(--accent); border-color: var(--accent); }
+
+  /* aviso passageiro do tamanho da fonte */
+  .zoom-toast {
+    position: absolute;
+    right: 18px;
+    bottom: 16px;
+    padding: 5px 11px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--sidebar);
+    color: var(--text);
+    font-size: 12px;
+    opacity: 0;
+    transition: opacity .18s;
+    pointer-events: none;
+  }
+  .zoom-toast.show { opacity: 1; }
 
   /* aviso de versão nova */
   .update {
@@ -278,6 +297,14 @@
   }
   .tabs button:hover { color: var(--text); }
   .tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+  /* O fechar não é uma aba: fica encostado na borda e não recebe sublinhado. */
+  .tabs .close {
+    flex: 0 0 34px;
+    font-size: 15px;
+    line-height: 1;
+    border-bottom-color: transparent;
+  }
+  .tabs .close:hover { color: var(--danger); }
   .panel-body { flex: 1; overflow-y: auto; padding: 10px; }
 
   .boot-head {
@@ -361,6 +388,7 @@
       <button class="ghost" id="toggle-panel">sessões</button>
     </div>
     <div class="screens" id="screens">
+      <div class="zoom-toast" id="zoom-toast"></div>
       <div class="placeholder" id="placeholder">
         Crie um terminal na barra ao lado.<br />
         Os processos vivem no daemon: fechar esta janela não mata a sessão.
@@ -374,6 +402,7 @@
       <button data-tab="boot">Boot</button>
       <button data-tab="active">Ativas</button>
       <button data-tab="usage">Uso</button>
+      <button class="close" id="close-panel" title="fechar (Esc)">×</button>
     </div>
     <div class="panel-body" id="panel-body"><div class="empty">selecione um terminal</div></div>
   </section>
@@ -499,6 +528,15 @@ let terminals = [];
 /// Enquanto um campo de nome está aberto, a sidebar não se redesenha —
 /// senão o poll periódico apaga o que está sendo digitado.
 let editing = false;
+
+/// Tamanho da fonte dos terminais, independente do zoom da janela.
+///
+/// O zoom do navegador aumentaria a interface inteira — sidebar, painéis,
+/// medidores. Aqui só a fonte do terminal muda, que é o que se quer ao apertar
+/// os olhos para ler uma saída.
+const FONT_MIN = 8;
+const FONT_MAX = 32;
+let fontSize = Number(localStorage.getItem('fontSize')) || 13;
 const collapsedGroups = new Set();
 
 const listEl = document.getElementById('list');
@@ -748,6 +786,40 @@ function promptForGroup() {
 }
 
 // ---------------------------------------------------------------- terminais
+/// Aplica o tamanho a todos os terminais e reajusta o PTY ao novo número de
+/// colunas — sem isso, a saída quebraria na largura antiga.
+function applyFontSize(novo) {
+  fontSize = Math.min(FONT_MAX, Math.max(FONT_MIN, novo));
+  localStorage.setItem('fontSize', String(fontSize));
+
+  for (const pane of panes.values()) {
+    pane.term.options.fontSize = fontSize;
+    sendResize(pane.socket, pane.fit, pane.term);
+  }
+
+  const toast = document.getElementById('zoom-toast');
+  const ativo = panes.get(activeId);
+  toast.textContent = ativo
+    ? `${fontSize}px · ${ativo.term.cols}×${ativo.term.rows}`
+    : `${fontSize}px`;
+  toast.classList.add('show');
+  clearTimeout(applyFontSize.timer);
+  applyFontSize.timer = setTimeout(() => toast.classList.remove('show'), 1200);
+}
+
+/// Reconhece os atalhos de zoom da fonte.
+///
+/// `Ctrl -` e `Ctrl 0` chegam com `key` previsível, mas `Ctrl +` varia com o
+/// layout do teclado: no ABNT2 o sinal está em `=` e em `+`, e o numérico manda
+/// `Add`. Por isso a checagem olha várias formas em vez de uma só.
+function zoomIntent(event) {
+  if (!event.ctrlKey || event.altKey) return null;
+  if (['+', '=', 'Add'].includes(event.key)) return 'in';
+  if (['-', '_', 'Subtract'].includes(event.key)) return 'out';
+  if (event.key === '0') return 'reset';
+  return null;
+}
+
 function ensurePane(id) {
   if (panes.has(id)) return panes.get(id);
 
@@ -758,7 +830,7 @@ function ensurePane(id) {
   const term = new Terminal({
     theme: THEMES[currentTheme].xterm,
     fontFamily: 'ui-monospace, "Cascadia Mono", Consolas, monospace',
-    fontSize: 13,
+    fontSize,
     cursorBlink: true,
     scrollback: 5000,
     allowProposedApi: true,
@@ -795,6 +867,17 @@ function connect(pane, id) {
   };
 
   socket.onmessage = (event) => pane.term.write(new Uint8Array(event.data));
+
+  // O xterm entrega a tecla ao PTY antes do documento vê-la. Devolver `false`
+  // aqui impede que o Ctrl+- vire um caractere de controle no shell.
+  pane.term.attachCustomKeyEventHandler((event) => {
+    if (event.type !== 'keydown') return true;
+    const intent = zoomIntent(event);
+    if (!intent) return true;
+    event.preventDefault();
+    applyFontSize(intent === 'reset' ? 13 : fontSize + (intent === 'in' ? 1 : -1));
+    return false;
+  });
 
   socket.onclose = async () => {
     if (pane.closed) return; // encerrado por você: não insistir
@@ -1158,6 +1241,7 @@ async function resumeSession(session, cwd, group) {
 }
 
 for (const button of document.getElementById('tabs').children) {
+  if (!button.dataset.tab) continue; // o × não é uma aba
   button.onclick = () => {
     activeTab = button.dataset.tab;
     for (const other of button.parentElement.children) {
@@ -1190,12 +1274,32 @@ document.getElementById('new-shell').onclick = () => createTerminal('shell');
 // A pasta nasce junto com o primeiro terminal dela, com o nome que você escolher.
 document.getElementById('new-group').onclick = promptForGroup;
 
-document.getElementById('toggle-panel').onclick = () => {
-  document.body.classList.toggle('with-panel');
-  if (document.body.classList.contains('with-panel')) renderPanel().catch(() => {});
+/// Abre ou fecha o painel lateral.
+///
+/// Fechar precisa reajustar os terminais: o painel ocupa 340px, e sem o `fit`
+/// a saída continuaria quebrando na largura antiga, mais estreita.
+function togglePanel(abrir) {
+  const corpo = document.body;
+  const aberto = abrir ?? !corpo.classList.contains('with-panel');
+  corpo.classList.toggle('with-panel', aberto);
+  document.getElementById('toggle-panel').classList.toggle('on', aberto);
+
+  if (aberto) renderPanel().catch(() => {});
   const pane = panes.get(activeId);
   if (pane) sendResize(pane.socket, pane.fit, pane.term);
-};
+}
+
+document.getElementById('toggle-panel').onclick = () => togglePanel();
+document.getElementById('close-panel').onclick = () => togglePanel(false);
+
+// Esc fecha o painel — mas só quando ele está aberto e o foco não está num
+// campo de texto, senão roubaria o Esc de quem está renomeando um terminal.
+window.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  if (!document.body.classList.contains('with-panel')) return;
+  if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+  togglePanel(false);
+});
 
 // ---------------------------------------------------------------- boot
 const select = document.getElementById('theme-select');
@@ -1208,6 +1312,26 @@ for (const [key, theme] of Object.entries(THEMES)) {
 select.value = currentTheme;
 select.onchange = () => applyTheme(select.value);
 applyTheme(currentTheme);
+
+// Fora do terminal (sidebar, painel) o atalho também vale — e o preventDefault
+// é o que impede o navegador de dar zoom na janela inteira.
+window.addEventListener('keydown', (event) => {
+  const intent = zoomIntent(event);
+  if (!intent) return;
+  event.preventDefault();
+  applyFontSize(intent === 'reset' ? 13 : fontSize + (intent === 'in' ? 1 : -1));
+});
+
+// Ctrl + roda do mouse: o idioma que todo terminal entende.
+screensEl.addEventListener(
+  'wheel',
+  (event) => {
+    if (!event.ctrlKey) return;
+    event.preventDefault();
+    applyFontSize(fontSize + (event.deltaY < 0 ? 1 : -1));
+  },
+  { passive: false },
+);
 
 window.addEventListener('resize', () => {
   const pane = panes.get(activeId);

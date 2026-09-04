@@ -3,6 +3,33 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [1.0.0-alpha.10] — 2026-09-04
+
+### Adicionado
+
+- **Zoom da fonte do terminal, sem mexer no resto.** `Ctrl +`, `Ctrl -`,
+  `Ctrl 0` e `Ctrl` + roda do mouse mudam só a fonte dos terminais — sidebar,
+  barra superior e medidores ficam do mesmo tamanho. O zoom do navegador é
+  bloqueado nesses atalhos, e o tamanho escolhido é lembrado.
+- **O painel lateral agora fecha:** botão `×` nas abas, tecla `Esc`, ou o próprio
+  botão "sessões", que passou a mostrar quando está ligado. Antes só o terceiro
+  funcionava, e nada indicava isso.
+
+### Corrigido
+
+- A mensagem de erro do atualizador **confundia limite de requisições com falta
+  de permissão**. Sem autenticação a API do GitHub aceita 60 consultas por hora
+  por endereço IP, e ao estourar responde 403 igual a uma negativa de acesso —
+  o programa mandava configurar um token, que não resolveria nada, ainda mais
+  com o repositório público. Agora ele lê o cabeçalho de limite e diz em quantos
+  minutos volta a funcionar.
+
+### Limitação conhecida
+
+O atualizador embutido troca o binário mas **não atualiza o registro do
+Windows** — quem atualizar pelo botão verá a versão antiga em Programas e
+Recursos, embora o programa rode a nova. Reinstalar pelo instalador corrige.
+
 ## [1.0.0-alpha.9] — 2026-09-04
 
 Primeira versão com o repositório público — a atualização dentro do programa

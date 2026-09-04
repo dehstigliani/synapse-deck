@@ -1,6 +1,6 @@
 [package]
 name = "synapse-deck"
-version = "1.0.0-alpha.9"
+version = "1.0.0-alpha.10"
 edition = "2021"
 description = "Synapse Deck — o deck de terminais e agentes, com PTY em Rust"
 license = "MIT"
