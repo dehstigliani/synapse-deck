@@ -3,6 +3,24 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [1.0.0-alpha.11] — 2026-09-04
+
+### Corrigido
+
+- **"terminal encerrado" aparecia sem o terminal ter encerrado, e a ferramenta
+  ficava inutilizável.** A verificação confundia *"não consegui perguntar"* com
+  *"o terminal morreu"*: qualquer falha de rede era lida como prova de morte. Um
+  daemon reiniciando derruba a ponte **e** a API ao mesmo tempo, então cada painel
+  concluía que tinha acabado e desistia para sempre de algo que voltaria em dois
+  segundos. Agora são três estados — vivo, sumiu (o servidor respondeu 404) e
+  incerto (não deu para falar com ele) — e só o segundo encerra o painel.
+- **Painéis órfãos ficavam na tela.** Ao reiniciar, o daemon recria os terminais
+  com identificadores novos, e os painéis antigos apontavam para ids que não
+  existiam mais. A lista do servidor passou a ser a fonte da verdade: painel que
+  não estiver nela é fechado.
+- O aviso de reconexão só aparece a partir da quarta tentativa. A primeira queda
+  quase sempre se resolve antes de você terminar de ler o aviso.
+
 ## [1.0.0-alpha.10] — 2026-09-04
 
 ### Adicionado

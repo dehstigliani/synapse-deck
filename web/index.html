@@ -550,8 +550,32 @@ async function api(path, options) {
     headers: { 'content-type': 'application/json' },
     ...options,
   });
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) {
+    const erro = new Error(await response.text());
+    // O status precisa sobreviver ao throw: quem chama tem que poder separar
+    // "o servidor disse que não existe" de "não consegui falar com o servidor".
+    erro.status = response.status;
+    throw erro;
+  }
   return response.status === 204 ? null : response.json();
+}
+
+/// O terminal existe, sumiu, ou não deu para saber?
+///
+/// Os três casos exigem reações diferentes, e tratá-los como dois foi o defeito
+/// que deixava a ferramenta inutilizável: um daemon reiniciando derrubava a
+/// ponte e a API ao mesmo tempo, e cada painel concluía "terminal encerrado" —
+/// desistindo para sempre de algo que voltaria em dois segundos.
+async function terminalState(id) {
+  try {
+    await api(`/terminals/${id}`);
+    return 'vivo';
+  } catch (error) {
+    // 404 é resposta do servidor: ele existe e afirma que o terminal não.
+    if (error.status === 404) return 'sumiu';
+    // Qualquer outra coisa é falha de comunicação — não é prova de nada.
+    return 'incerto';
+  }
 }
 
 const formatTokens = (value) =>
@@ -563,7 +587,15 @@ const formatDate = (epochSeconds) =>
 // ---------------------------------------------------------------- sidebar
 async function refresh() {
   terminals = await api('/terminals');
-  if (activeId && !terminals.some((item) => item.id === activeId)) activeId = null;
+
+  // Painel apontando para terminal que o servidor não lista mais é painel morto.
+  // Acontece sempre que o daemon reinicia: os terminais voltam com ids novos.
+  const vivos = new Set(terminals.map((item) => item.id));
+  for (const id of [...panes.keys()]) {
+    if (!vivos.has(id)) closePane(id);
+  }
+
+  if (activeId && !vivos.has(activeId)) activeId = null;
   renderSidebar();
   if (!activeId && terminals.length) return activate(terminals[0].id);
   updateTopbar();
@@ -857,6 +889,9 @@ function connect(pane, id) {
   pane.socket = socket;
 
   socket.onopen = () => {
+    if (pane.attempts >= 4) {
+      pane.term.write('\r\n\x1b[38;5;244m[reconectado]\x1b[0m\r\n');
+    }
     if (pane.attempts > 0) {
       // Ao reatar, o daemon reenvia o scrollback inteiro. Sem limpar antes, ele
       // apareceria duplicado embaixo do que já estava na tela.
@@ -882,26 +917,31 @@ function connect(pane, id) {
   socket.onclose = async () => {
     if (pane.closed) return; // encerrado por você: não insistir
 
-    // O terminal ainda existe no daemon, ou o processo acabou de verdade?
-    let alive = false;
-    try {
-      await api(`/terminals/${id}`);
-      alive = true;
-    } catch {
-      alive = false;
-    }
+    const estado = await terminalState(id);
 
-    if (!alive) {
+    if (estado === 'sumiu') {
+      // O daemon respondeu que este terminal não existe mais. Manter o painel
+      // na tela seria mentir: `refresh` reconstrói a lista a partir do servidor,
+      // e se um daemon reiniciado recriou os terminais com ids novos, é assim
+      // que a interface volta a bater com a realidade.
       pane.term.write('\r\n\x1b[38;5;244m[terminal encerrado]\x1b[0m\r\n');
+      closePane(id);
+      refresh().catch(() => {});
       return;
     }
 
     pane.attempts += 1;
     // Espera crescente até 5s: um daemon reiniciando não precisa de enxurrada.
     const delay = Math.min(300 * pane.attempts, 5000);
-    pane.term.write(
-      `\r\n\x1b[38;5;244m[ponte caiu — o processo segue vivo, reconectando…]\x1b[0m\r\n`,
-    );
+
+    // A primeira queda não merece alarde: quase sempre volta antes de você ler.
+    // Só depois de algumas tentativas vale dizer que algo está errado.
+    if (pane.attempts === 4) {
+      pane.term.write(
+        `\r\n\x1b[38;5;244m[sem contato com o daemon — continuo tentando]\x1b[0m\r\n`,
+      );
+    }
+
     setTimeout(() => {
       if (!pane.closed) connect(pane, id);
     }, delay);
