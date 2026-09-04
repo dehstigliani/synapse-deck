@@ -3,6 +3,25 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [1.0.0-alpha.12] — 2026-09-04
+
+### Adicionado
+
+- **Arrastar terminal entre pastas.** Solte sobre o nome da pasta, sobre outro
+  terminal dela, ou logo abaixo do último item. A marca mostra onde vai cair, não
+  apenas que algo está sendo arrastado.
+- **Porta configurável** por `SYNAPSE_DECK_PORT`. Um build de desenvolvimento na
+  mesma porta do Deck instalado fazia o instalado concluir que "já está rodando"
+  e encerrar — você clicava no atalho e recebia a janela do outro programa.
+- **Aviso de daemon fora de contato** na barra. Antes a falha era engolida em
+  silêncio: a tela seguia mostrando dados congelados sem nada indicando isso.
+
+### Corrigido
+
+- **O 404 passou a ser confirmado antes de encerrar um painel.** Encerrar é
+  irreversível — leva o scrollback junto — enquanto insistir custa uma
+  requisição; diante dessa assimetria, uma resposta negativa isolada não bastava.
+
 ## [1.0.0-alpha.11] — 2026-09-04
 
 ### Corrigido

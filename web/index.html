@@ -133,6 +133,22 @@
   }
   .empty { color: var(--muted); padding: 12px 8px; font-size: 12px; }
 
+  /* arrastar terminal entre pastas */
+  .item[draggable='true'] { cursor: grab; }
+  .item.dragging { opacity: .4; cursor: grabbing; }
+  /* A linha marca ONDE vai cair, não apenas que algo está sendo arrastado. */
+  .item.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+  .item.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+  .group-head.drop-into {
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-radius: 5px;
+  }
+  /* Alvo para soltar depois do último item de uma pasta, que de outro modo
+     seria uma faixa morta na sidebar. */
+  .drop-tail { height: 10px; margin: -4px 6px 2px; border-radius: 3px; }
+  .drop-tail.drop-into { background: var(--accent-soft); box-shadow: inset 0 2px 0 var(--accent); }
+
   .actions { padding: 9px; border-top: 1px solid var(--border); display: flex; gap: 6px; flex-wrap: wrap; }
   .actions button {
     flex: 1;
@@ -216,6 +232,25 @@
   .update:hover { background: var(--accent-soft); }
   .update .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
   .update[disabled] { opacity: .6; cursor: default; }
+
+  /* daemon fora de contato */
+  .offline {
+    display: none;
+    align-items: center;
+    gap: 7px;
+    padding: 3px 10px;
+    border: 1px solid var(--danger);
+    border-radius: 999px;
+    color: var(--danger);
+    font-size: 12px;
+  }
+  .offline.show { display: inline-flex; }
+  .offline .pip {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--danger);
+    animation: pisca 1.1s ease-in-out infinite;
+  }
+  @keyframes pisca { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
 
   /* pulso de consumo na navbar */
   .pulse { display: flex; align-items: center; gap: 7px; }
@@ -368,6 +403,10 @@
         <span class="dot"></span>
         <span id="update-label">versão nova</span>
       </button>
+      <span class="offline" id="offline" title="o Deck não está conseguindo falar com o daemon — os processos seguem lá; é a ligação que caiu">
+        <span class="pip"></span>
+        <span id="offline-label">sem contato</span>
+      </span>
       <span class="pulse" id="pulse" hidden>
         <span class="label">5h</span>
         <span class="bar"><span class="fill" id="pulse-5h-fill"></span></span>
@@ -578,6 +617,20 @@ async function terminalState(id) {
   }
 }
 
+/// Confirma o 404 antes de destruir um painel.
+///
+/// Encerrar é irreversível — o scrollback vai junto — enquanto insistir custa
+/// uma requisição. Diante dessa assimetria, uma única resposta negativa não
+/// basta: o veredito só sai depois de duas em sequência, espaçadas.
+async function confirmedState(id, tentativas = 2, intervalo = 700) {
+  let estado = await terminalState(id);
+  for (let i = 1; i < tentativas && estado === 'sumiu'; i++) {
+    await new Promise((resolve) => setTimeout(resolve, intervalo));
+    estado = await terminalState(id);
+  }
+  return estado;
+}
+
 const formatTokens = (value) =>
   value >= 1e6 ? `${(value / 1e6).toFixed(1)}M` : value >= 1e3 ? `${Math.round(value / 1e3)}k` : String(value);
 
@@ -602,7 +655,8 @@ async function refresh() {
 }
 
 function renderSidebar() {
-  if (editing) return;
+  // Redesenhar no meio de um arrasto destruiria o elemento sendo arrastado.
+  if (editing || dragging) return;
   listEl.textContent = '';
   if (!terminals.length) {
     const empty = document.createElement('div');
@@ -623,6 +677,16 @@ function renderSidebar() {
     const head = document.createElement('div');
     const collapsed = collapsedGroups.has(group);
     head.className = 'group-head' + (collapsed ? ' collapsed' : '');
+    head.addEventListener('dragover', (event) => {
+      if (!dragging || dragging.group === group) return;
+      event.preventDefault();
+      head.classList.add('drop-into');
+    });
+    head.addEventListener('dragleave', () => head.classList.remove('drop-into'));
+    head.addEventListener('drop', (event) => {
+      event.preventDefault();
+      dropInto(group);
+    });
     head.onclick = () => {
       collapsed ? collapsedGroups.delete(group) : collapsedGroups.add(group);
       renderSidebar();
@@ -662,6 +726,46 @@ function renderSidebar() {
 
     if (collapsed) continue;
     for (const item of members) listEl.append(renderItem(item));
+
+    // Soltar logo abaixo do último item ainda é "nesta pasta".
+    const cauda = document.createElement('div');
+    cauda.className = 'drop-tail';
+    cauda.addEventListener('dragover', (event) => {
+      if (!dragging || dragging.group === group) return;
+      event.preventDefault();
+      cauda.classList.add('drop-into');
+    });
+    cauda.addEventListener('dragleave', () => cauda.classList.remove('drop-into'));
+    cauda.addEventListener('drop', (event) => {
+      event.preventDefault();
+      dropInto(group);
+    });
+    listEl.append(cauda);
+  }
+}
+
+/// Qual terminal está sendo arrastado agora.
+let dragging = null;
+
+/// Solta o terminal arrastado numa pasta.
+///
+/// Move só se a pasta mudou: renomear para o mesmo valor gastaria uma escrita
+/// no workspace e um redesenho à toa.
+async function dropInto(group) {
+  const arrastado = dragging;
+  dragging = null;
+  limparMarcas();
+  if (!arrastado || arrastado.group === group) return;
+  await api(`/terminals/${arrastado.id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ group }),
+  });
+  await refresh();
+}
+
+function limparMarcas() {
+  for (const el of listEl.querySelectorAll('.drop-into, .drop-before, .drop-after, .dragging')) {
+    el.classList.remove('drop-into', 'drop-before', 'drop-after', 'dragging');
   }
 }
 
@@ -669,6 +773,37 @@ function renderItem(item) {
   const row = document.createElement('div');
   row.className = 'item' + (item.id === activeId ? ' active' : '');
   row.onclick = () => activate(item.id);
+
+  row.draggable = true;
+  row.addEventListener('dragstart', (event) => {
+    dragging = item;
+    row.classList.add('dragging');
+    event.dataTransfer.effectAllowed = 'move';
+    // Alguns navegadores só iniciam o arrasto se houver dado no evento.
+    event.dataTransfer.setData('text/plain', item.id);
+  });
+  row.addEventListener('dragend', () => {
+    dragging = null;
+    limparMarcas();
+  });
+  row.addEventListener('dragover', (event) => {
+    if (!dragging || dragging.id === item.id) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    // Metade de cima cai antes, metade de baixo cai depois — o mesmo
+    // vocabulário de qualquer lista reordenável.
+    const meio = row.getBoundingClientRect().top + row.offsetHeight / 2;
+    row.classList.toggle('drop-before', event.clientY < meio);
+    row.classList.toggle('drop-after', event.clientY >= meio);
+  });
+  row.addEventListener('dragleave', () => {
+    row.classList.remove('drop-before', 'drop-after');
+  });
+  row.addEventListener('drop', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dropInto(item.group);
+  });
 
   // Arrastar para outra pasta. O identificador vai no próprio evento, então o
   // alvo não precisa saber nada além do que foi solto nele.
@@ -917,7 +1052,7 @@ function connect(pane, id) {
   socket.onclose = async () => {
     if (pane.closed) return; // encerrado por você: não insistir
 
-    const estado = await terminalState(id);
+    const estado = await confirmedState(id);
 
     if (estado === 'sumiu') {
       // O daemon respondeu que este terminal não existe mais. Manter o painel
@@ -1379,7 +1514,26 @@ window.addEventListener('resize', () => {
 });
 
 // O daemon é a fonte de verdade: repescar mostra terminal que morreu sozinho.
-setInterval(() => refresh().catch(() => {}), 4000);
+/// O poll periódico também é um sinal de vida do daemon.
+///
+/// Antes ele engolia o erro calado: com o daemon fora, a tela seguia mostrando
+/// dados velhos sem nada indicando que estavam congelados.
+let falhasSeguidas = 0;
+setInterval(async () => {
+  try {
+    await refresh();
+    falhasSeguidas = 0;
+    document.getElementById('offline').classList.remove('show');
+  } catch {
+    falhasSeguidas += 1;
+    // Uma falha isolada não merece alarme; a partir da segunda, avisa.
+    if (falhasSeguidas >= 2) {
+      document.getElementById('offline-label').textContent =
+        `sem contato há ${falhasSeguidas * 4}s`;
+      document.getElementById('offline').classList.add('show');
+    }
+  }
+}, 4000);
 updatePulse().catch(() => {});
 setInterval(() => updatePulse().catch(() => {}), 60000);
 

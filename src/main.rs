@@ -30,8 +30,22 @@ use terminal::{Registry, Terminal, TerminalInfo};
 #[folder = "web/"]
 struct WebAssets;
 
-/// Porta do daemon. Só escuta em loopback: nada deste workspace vai para a rede.
-const LISTEN_ADDRESS: &str = "127.0.0.1:7788";
+/// Porta padrão do daemon. Só escuta em loopback: nada vai para a rede.
+const DEFAULT_PORT: u16 = 7788;
+
+/// Endereço de escuta, com a porta sobrescrevível por `SYNAPSE_DECK_PORT`.
+///
+/// Existe por uma dor concreta: rodar um build de desenvolvimento na mesma porta
+/// do Deck instalado faz o instalado achar que "já está rodando" e encerrar —
+/// a pessoa clica no atalho e recebe a janela do outro programa, sem entender
+/// por que a versão dela não abre.
+fn listen_address() -> String {
+    let porta = std::env::var("SYNAPSE_DECK_PORT")
+        .ok()
+        .and_then(|valor| valor.trim().parse::<u16>().ok())
+        .unwrap_or(DEFAULT_PORT);
+    format!("127.0.0.1:{porta}")
+}
 
 /// Nome da pasta usada quando o terminal não declara nenhuma.
 const DEFAULT_GROUP: &str = "Geral";
@@ -167,8 +181,9 @@ fn already_running(address: &str) -> bool {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    if already_running(LISTEN_ADDRESS) {
-        open_window(LISTEN_ADDRESS);
+    let address = listen_address();
+    if already_running(&address) {
+        open_window(&address);
         return Ok(());
     }
 
@@ -203,13 +218,13 @@ async fn main() -> anyhow::Result<()> {
     // Limpa o binário antigo deixado por uma atualização anterior.
     update::clean_previous();
 
-    let listener = tokio::net::TcpListener::bind(LISTEN_ADDRESS).await?;
-    println!("Synapse Deck no ar em http://{LISTEN_ADDRESS}");
+    let listener = tokio::net::TcpListener::bind(&address).await?;
+    println!("Synapse Deck no ar em http://{address}");
     println!("os terminais sobrevivem ao fechar a janela — feche e volte");
 
     // A janela sobe depois que a porta já aceita conexão, senão ela abre antes
     // do servidor responder e mostra erro no primeiro carregamento.
-    open_window(LISTEN_ADDRESS);
+    open_window(&address);
 
     axum::serve(listener, app).await?;
     Ok(())
