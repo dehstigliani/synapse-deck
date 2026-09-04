@@ -3,6 +3,26 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [1.0.0-alpha.9] — 2026-09-04
+
+Primeira versão com o repositório público — a atualização dentro do programa
+passa a funcionar **sem token nenhum**, em qualquer máquina.
+
+### Alterado
+
+- O tema **Orange Innovation virou Ember**. As cores continuam as mesmas; o que
+  saiu foi a atribuição da paleta a um design system de terceiro, que não fazia
+  sentido num repositório público sob licença MIT.
+
+### Segurança
+
+- **Barreira contra credencial**: um hook de pre-commit recusa token do GitHub,
+  chave AWS, chave de API, webhook do Slack, chave privada e atribuição a
+  variável de senha. Cobre o que o `.gitignore` não pega — o segredo colado no
+  meio de um arquivo legítimo. Ative com `git config core.hooksPath scripts`.
+- `.gitignore` passa a cobrir `.env`, chaves, certificados, arquivos de token,
+  configuração de nuvem e os artefatos que o CI gera na raiz.
+
 ## [1.0.0-alpha.8] — 2026-09-04
 
 ### Segurança
