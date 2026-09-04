@@ -46,14 +46,53 @@ fn asset_name() -> &'static str {
     }
 }
 
+/// Onde o token de leitura fica guardado.
+///
+/// Arquivo, e não variável de ambiente, por um motivo concreto: o Deck cria
+/// terminais, e variável de ambiente é herdada por todo processo filho — o token
+/// apareceria no ambiente de cada terminal, inclusive das sessões de agente.
+/// Num arquivo ele fica no processo que precisa dele e em mais nenhum.
+///
+/// A variável continua sendo aceita como alternativa, para quem preferir; nesse
+/// caso ela é removida dos filhos na hora do spawn.
+pub fn token_path() -> Option<PathBuf> {
+    let base = std::env::var("APPDATA")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| std::env::var("XDG_CONFIG_HOME").ok().map(PathBuf::from))
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|home| PathBuf::from(home).join(".config"))
+        })?;
+    Some(base.join("synapse-deck").join("github-token"))
+}
+
+fn read_token() -> Option<String> {
+    let do_arquivo = token_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|conteudo| conteudo.trim().to_string());
+
+    let escolhido = match do_arquivo {
+        Some(token) if !token.is_empty() => Some(token),
+        _ => std::env::var("SYNAPSE_DECK_GITHUB_TOKEN")
+            .ok()
+            .map(|token| token.trim().to_string()),
+    }?;
+
+    if escolhido.is_empty() {
+        None
+    } else {
+        Some(escolhido)
+    }
+}
+
 fn request(url: &str) -> ureq::Request {
     let mut request = ureq::get(url)
         .timeout(TIMEOUT)
         .set("User-Agent", "synapse-deck");
-    if let Ok(token) = std::env::var("SYNAPSE_DECK_GITHUB_TOKEN") {
-        if !token.trim().is_empty() {
-            request = request.set("Authorization", &format!("Bearer {}", token.trim()));
-        }
+    if let Some(token) = read_token() {
+        request = request.set("Authorization", &format!("Bearer {token}"));
     }
     request
 }
@@ -216,9 +255,7 @@ pub fn apply() -> Result<PathBuf> {
 
     // Em repositório privado o link público não serve: baixa-se pelo endpoint da
     // API, que aceita o token, pedindo o conteúdo bruto em vez do JSON do asset.
-    let has_token = std::env::var("SYNAPSE_DECK_GITHUB_TOKEN")
-        .map(|token| !token.trim().is_empty())
-        .unwrap_or(false);
+    let has_token = read_token().is_some();
 
     let response = if has_token {
         let api_url = asset

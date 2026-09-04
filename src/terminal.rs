@@ -22,7 +22,9 @@ const BROADCAST_CAPACITY: usize = 1024;
 /// repassa aos filhos — e o `CLAUDE_CODE_CHILD_SESSION` faz o Claude **não
 /// gravar o transcript**, que é justamente a matéria-prima do histórico de
 /// sessões e do medidor de contexto. Um terminal do workspace é sessão de topo.
-const INHERITED_SESSION_VARS: [&str; 9] = [
+const INHERITED_SESSION_VARS: [&str; 10] = [
+    // O token do atualizador nao tem nada que fazer dentro de um terminal.
+    "SYNAPSE_DECK_GITHUB_TOKEN",
     "CLAUDE_CODE_CHILD_SESSION",
     "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_CODE_BRIDGE_SESSION_ID",

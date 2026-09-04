@@ -3,6 +3,19 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [1.0.0-alpha.8] — 2026-09-04
+
+### Segurança
+
+- **O token do atualizador saiu da variável de ambiente e foi para um arquivo.**
+  Variável de ambiente é herdada por todo processo filho — e o Deck cria
+  terminais, então o token apareceria no ambiente de cada um deles, inclusive das
+  sessões de agente. Agora ele é lido de
+  `%APPDATA%\synapse-deck\github-token` e fica só no processo que precisa dele.
+- A variável continua aceita como alternativa, mas passou a ser **removida do
+  ambiente dos terminais** no momento do spawn, junto das marcas de sessão do
+  Claude Code.
+
 ## [1.0.0-alpha.7] — 2026-09-04
 
 ### Adicionado
