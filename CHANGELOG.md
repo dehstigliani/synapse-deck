@@ -3,6 +3,15 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [1.0.0-alpha.6] — 2026-09-04
+
+### Alterado
+
+- **Logo nova**: o chip isométrico com o raio, no lugar do cérebro. Além de
+  combinar melhor com o nome, a forma losangular é geométrica e sobrevive em
+  16 px, coisa que o desenho anterior não fazia — ele virava mancha.
+- Marca, favicon, ícone do executável e do instalador regenerados da arte nova.
+
 ## [1.0.0-alpha.5] — 2026-09-03
 
 ### Corrigido
