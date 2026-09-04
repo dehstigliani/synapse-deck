@@ -6,6 +6,7 @@
 mod claude;
 mod terminal;
 mod update;
+mod workspace;
 
 use axum::{
     extract::{
@@ -58,6 +59,11 @@ struct CreateRequest {
     resume: Option<String>,
     /// Marcar a pasta como confiável antes de subir o Claude. Padrão: sim.
     trust: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct RenameRequest {
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -168,6 +174,13 @@ async fn main() -> anyhow::Result<()> {
 
     let registry = Arc::new(Registry::default());
 
+    // Recria o workspace da execucao anterior. Os PTYs morrem com o processo,
+    // mas a forma do workspace nao precisa morrer junto.
+    let restored = workspace::restore(&registry);
+    if restored > 0 {
+        println!("{restored} terminais restaurados do workspace anterior");
+    }
+
     let app = Router::new()
         .route("/api/terminals", get(list_terminals).post(create_terminal))
         .route(
@@ -176,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/terminals/:id/claude-session", get(terminal_session))
         .route("/api/groups", get(list_groups))
+        .route("/api/groups/:name", axum::routing::patch(rename_group))
         .route("/api/usage", get(usage_report))
         .route("/api/usage/pulse", get(usage_pulse))
         .route("/api/update", get(check_update).post(apply_update))
@@ -225,6 +239,31 @@ async fn list_terminals(State(registry): State<Arc<Registry>>) -> Json<Vec<Termi
 
 async fn list_groups(State(registry): State<Arc<Registry>>) -> Json<Vec<String>> {
     Json(registry.groups())
+}
+
+/// Renomeia uma pasta inteira.
+async fn rename_group(
+    Path(name): Path<String>,
+    State(registry): State<Arc<Registry>>,
+    Json(request): Json<RenameRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let novo = request.name.trim();
+    if novo.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let moved = registry.rename_group(&name, novo);
+    persist(&registry);
+    Ok(Json(serde_json::json!({ "moved": moved })))
+}
+
+/// Grava o workspace depois de qualquer mudanca de forma.
+///
+/// Falhar aqui nao pode derrubar a operacao que o usuario pediu: no pior caso
+/// ele perde a restauracao, nao o terminal que acabou de criar.
+fn persist(registry: &Arc<Registry>) {
+    if let Err(error) = workspace::save(registry) {
+        eprintln!("workspace nao foi salvo: {error}");
+    }
 }
 
 /// Histórico de sessões do Claude Code num diretório — alimenta o painel de sessões.
@@ -332,6 +371,8 @@ async fn create_terminal(
         )
         .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
 
+    persist(&registry);
+
     Ok(Json(CreateResponse {
         terminal,
         trusted_now,
@@ -343,10 +384,11 @@ async fn update_terminal(
     State(registry): State<Arc<Registry>>,
     Json(request): Json<UpdateRequest>,
 ) -> Result<Json<TerminalInfo>, StatusCode> {
-    registry
+    let updated = registry
         .update(&id, request.name, request.group)
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    persist(&registry);
+    Ok(Json(updated))
 }
 
 async fn kill_terminal(
@@ -354,7 +396,10 @@ async fn kill_terminal(
     State(registry): State<Arc<Registry>>,
 ) -> StatusCode {
     match registry.remove(&id) {
-        Some(()) => StatusCode::NO_CONTENT,
+        Some(()) => {
+            persist(&registry);
+            StatusCode::NO_CONTENT
+        }
         None => StatusCode::NOT_FOUND,
     }
 }

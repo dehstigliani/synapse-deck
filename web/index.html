@@ -83,6 +83,20 @@
   .group-head .caret { transition: transform .12s; font-size: 9px; }
   .group-head.collapsed .caret { transform: rotate(-90deg); }
   .group-head .count { margin-left: auto; opacity: .7; }
+  /* Alvo de soltar: a pasta inteira acende quando um terminal paira sobre ela. */
+  .group-head.drop { color: var(--accent); background: var(--accent-soft); border-radius: 5px; }
+  .group-head input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    color: var(--text);
+    font: inherit;
+    text-transform: none;
+    letter-spacing: 0;
+    padding: 1px 5px;
+  }
+  .item.dragging { opacity: .45; }
 
   .item {
     display: flex;
@@ -549,10 +563,32 @@ function renderSidebar() {
     caret.textContent = '▼';
     const title = document.createElement('span');
     title.textContent = group;
+    title.title = 'duplo clique para renomear a pasta';
+    title.ondblclick = (event) => {
+      event.stopPropagation();
+      startGroupRename(head, title, group);
+    };
     const count = document.createElement('span');
     count.className = 'count';
     count.textContent = members.length;
     head.append(caret, title, count);
+
+    // Soltar um terminal sobre a pasta move ele para cá.
+    head.ondragover = (event) => {
+      event.preventDefault();
+      head.classList.add('drop');
+    };
+    head.ondragleave = () => head.classList.remove('drop');
+    head.ondrop = async (event) => {
+      event.preventDefault();
+      head.classList.remove('drop');
+      const id = event.dataTransfer.getData('text/plain');
+      const moved = terminals.find((item) => item.id === id);
+      if (!moved || moved.group === group) return;
+      await api(`/terminals/${id}`, { method: 'PATCH', body: JSON.stringify({ group }) });
+      await refresh();
+    };
+
     listEl.append(head);
 
     if (collapsed) continue;
@@ -564,6 +600,21 @@ function renderItem(item) {
   const row = document.createElement('div');
   row.className = 'item' + (item.id === activeId ? ' active' : '');
   row.onclick = () => activate(item.id);
+
+  // Arrastar para outra pasta. O identificador vai no próprio evento, então o
+  // alvo não precisa saber nada além do que foi solto nele.
+  row.draggable = true;
+  row.ondragstart = (event) => {
+    event.dataTransfer.setData('text/plain', item.id);
+    event.dataTransfer.effectAllowed = 'move';
+    row.classList.add('dragging');
+    // Enquanto arrasta, a sidebar não pode se redesenhar por baixo.
+    editing = true;
+  };
+  row.ondragend = () => {
+    row.classList.remove('dragging');
+    editing = false;
+  };
 
   const dot = document.createElement('span');
   dot.className = 'dot' + (item.alive ? '' : ' dead');
@@ -637,6 +688,39 @@ function startInlineEdit(row, label, item, field) {
   };
 }
 
+/// Renomeia a pasta inteira: todos os terminais dela vão junto.
+function startGroupRename(head, title, group) {
+  editing = true;
+  const input = document.createElement('input');
+  input.value = group;
+  head.replaceChild(input, title);
+  input.focus();
+  input.select();
+  input.onclick = (event) => event.stopPropagation();
+
+  let done = false;
+  const finish = async (value) => {
+    if (done) return;
+    done = true;
+    editing = false;
+    if (value && value !== group) {
+      await api(`/groups/${encodeURIComponent(group)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ name: value }),
+      });
+      // A pasta recolhida some quando muda de nome; leva o estado junto.
+      if (collapsedGroups.delete(group)) collapsedGroups.add(value);
+    }
+    await refresh();
+  };
+  input.onblur = () => finish(input.value.trim());
+  input.onkeydown = (event) => {
+    event.stopPropagation();
+    if (event.key === 'Enter') finish(input.value.trim());
+    if (event.key === 'Escape') finish(null);
+  };
+}
+
 /// Pede o nome da pasta na própria sidebar, sem caixa de diálogo do browser.
 function promptForGroup() {
   editing = true;
@@ -684,27 +768,73 @@ function ensurePane(id) {
   term.loadAddon(fit);
   term.open(host);
 
+  const pane = { host, term, fit, socket: null, attempts: 0, closed: false };
+  panes.set(id, pane);
+  connect(pane, id);
+  return pane;
+}
+
+/// Liga (ou religa) o painel ao PTY.
+///
+/// O processo vive no daemon, então uma ponte caída não é o fim da sessão — é só
+/// a ligação. Antes esta função rodava uma vez só: o painel escrevia "ponte
+/// fechada" e ficava morto até recarregar a página, o que contradizia a própria
+/// mensagem. Agora ela reconecta sozinha.
+function connect(pane, id) {
   const socket = new WebSocket(`ws://${location.host}/ws/${id}`);
   socket.binaryType = 'arraybuffer';
-  socket.onmessage = (event) => term.write(new Uint8Array(event.data));
-  socket.onopen = () => sendResize(socket, fit, term);
-  socket.onclose = () =>
-    term.write('\r\n\x1b[38;5;61m[ponte fechada — o processo segue no daemon]\x1b[0m\r\n');
+  pane.socket = socket;
 
-  term.onData((data) => {
-    if (socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'input', data }));
+  socket.onopen = () => {
+    if (pane.attempts > 0) {
+      // Ao reatar, o daemon reenvia o scrollback inteiro. Sem limpar antes, ele
+      // apareceria duplicado embaixo do que já estava na tela.
+      pane.term.reset();
+      pane.attempts = 0;
+    }
+    sendResize(socket, pane.fit, pane.term);
+  };
+
+  socket.onmessage = (event) => pane.term.write(new Uint8Array(event.data));
+
+  socket.onclose = async () => {
+    if (pane.closed) return; // encerrado por você: não insistir
+
+    // O terminal ainda existe no daemon, ou o processo acabou de verdade?
+    let alive = false;
+    try {
+      await api(`/terminals/${id}`);
+      alive = true;
+    } catch {
+      alive = false;
+    }
+
+    if (!alive) {
+      pane.term.write('\r\n\x1b[38;5;244m[terminal encerrado]\x1b[0m\r\n');
+      return;
+    }
+
+    pane.attempts += 1;
+    // Espera crescente até 5s: um daemon reiniciando não precisa de enxurrada.
+    const delay = Math.min(300 * pane.attempts, 5000);
+    pane.term.write(
+      `\r\n\x1b[38;5;244m[ponte caiu — o processo segue vivo, reconectando…]\x1b[0m\r\n`,
+    );
+    setTimeout(() => {
+      if (!pane.closed) connect(pane, id);
+    }, delay);
+  };
+
+  pane.term.onData((data) => {
+    if (pane.socket && pane.socket.readyState === WebSocket.OPEN) {
+      pane.socket.send(JSON.stringify({ type: 'input', data }));
     }
   });
-
-  const pane = { host, term, fit, socket };
-  panes.set(id, pane);
-  return pane;
 }
 
 function sendResize(socket, fit, term) {
   fit.fit();
-  if (socket.readyState === WebSocket.OPEN) {
+  if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
   }
 }
@@ -712,7 +842,10 @@ function sendResize(socket, fit, term) {
 function closePane(id) {
   const pane = panes.get(id);
   if (!pane) return;
-  pane.socket.close();
+  // Sinaliza que o fechamento foi intencional: sem isto o `onclose` tentaria
+  // reconectar num terminal que você acabou de encerrar.
+  pane.closed = true;
+  if (pane.socket) pane.socket.close();
   pane.term.dispose();
   pane.host.remove();
   panes.delete(id);

@@ -296,6 +296,19 @@ impl Registry {
         Some(terminal.info())
     }
 
+    /// Renomeia uma pasta inteira: todos os terminais dela passam a apontar
+    /// para o nome novo. Devolve quantos foram movidos.
+    pub fn rename_group(&self, from: &str, to: &str) -> usize {
+        let mut moved = 0;
+        for terminal in self.terminals.lock().unwrap().iter() {
+            if terminal.group() == from {
+                terminal.set_group(to.to_string());
+                moved += 1;
+            }
+        }
+        moved
+    }
+
     /// As pastas existentes, na ordem em que aparecem.
     pub fn groups(&self) -> Vec<String> {
         let mut seen: Vec<String> = Vec::new();

@@ -3,6 +3,29 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [1.0.0-alpha.7] — 2026-09-04
+
+### Adicionado
+
+- **O workspace volta ao reabrir.** Nome, pasta, diretório e comando de cada
+  terminal são gravados em `%APPDATA%\synapse-deck\workspace.json` a cada
+  mudança, e recriados na próxima abertura. Terminais de agente sobem com
+  `--resume`: a conversa continua, não recomeça.
+
+### Corrigido
+
+- **"Ponte fechada" não tinha volta.** A mensagem dizia que o processo seguia
+  vivo, mas o painel ficava morto até recarregar a página. Agora ele **reconecta
+  sozinho**, com espera crescente até 5s, e separa os dois casos: ponte caída com
+  processo vivo (reconecta) e processo encerrado de verdade (avisa e para).
+- Ao reatar, a tela é limpa antes do replay — senão o histórico vinha duplicado.
+- Encerrar um terminal de propósito não dispara mais tentativa de reconexão.
+
+### Limitação conhecida
+
+Com **dois terminais de agente na mesma pasta**, ambos gravam a sessão mais
+recente daquele diretório e voltam apontando para a mesma conversa.
+
 ## [1.0.0-alpha.6] — 2026-09-04
 
 ### Alterado
