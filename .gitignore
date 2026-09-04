@@ -1,3 +1,39 @@
 /target
 *.pdb
 .DS_Store
+
+# ---------------------------------------------------------------- credenciais
+# Nada aqui deve ser versionado. Se o repositório for público, um arquivo destes
+# commitado por engano vira credencial vazada — e vazada fica: clone e cache
+# guardam o que o `git rm` já não alcança.
+.env
+.env.*
+!.env.example
+*.local
+
+# Token do atualizador. Ele mora em %APPDATA%\synapse-deck\github-token, fora do
+# repositório, mas a regra fica aqui para o caso de uma cópia aparecer na árvore.
+github-token
+*token*.txt
+*secret*
+*credential*
+
+# Chaves e certificados
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+
+# Configuração de nuvem que costuma trazer credencial junto
+.aws/
+.npmrc
+.netrc
+
+# Artefatos de empacotamento e teste
+/dist
+notas-do-release.md
+synapse-deck-setup-*.exe
+synapse-deck-*.zip
+synapse-deck-*.tar.gz

@@ -142,3 +142,20 @@ Fora do recorte por decisão, não por esquecimento:
 - Layouts e painéis divididos — 1 terminal ativo por vez basta para começar
 - Persistência do workspace (pastas e terminais) entre reinícios do daemon
 - Autenticação — não faz sentido em loopback
+
+## Barreira contra credencial
+
+O repositório tem um hook que recusa commits com aparência de credencial —
+token do GitHub, chave AWS, chave privada, atribuição a variável de senha. Ele
+cobre o caso que o `.gitignore` não pega: o segredo colado no meio de um
+arquivo legítimo.
+
+Depois de clonar, ative com:
+
+```bash
+git config core.hooksPath scripts
+```
+
+Para um exemplo comprovadamente falso, `git commit --no-verify` e explique no
+corpo do commit. Se um segredo real chegou a ir para o remoto, **revogue a
+credencial**: apagar do código não desfaz o vazamento.

@@ -1,0 +1,41 @@
+#!/bin/sh
+# Barreira contra commitar credencial.
+#
+# O .gitignore evita o acidente comum — um arquivo inteiro de segredo. Este hook
+# cobre o outro caso, mais fácil de cometer: a credencial colada no meio de um
+# arquivo legítimo, num teste, num comentário, num exemplo de configuração.
+#
+# Instalar:  git config core.hooksPath scripts
+#
+# Para uma exceção legítima (um exemplo claramente falso, por exemplo), use:
+#   git commit --no-verify
+# e diga no corpo do commit por que é falso.
+
+achados=$(git diff --cached --no-color -U0 |
+  grep -nE '^\+' |
+  grep -InE \
+    -e 'gh[pousr]_[A-Za-z0-9]{16,}' \
+    -e 'github_pat_[A-Za-z0-9_]{20,}' \
+    -e 'AKIA[0-9A-Z]{16}' \
+    -e 'ASIA[0-9A-Z]{16}' \
+    -e 'sk-[A-Za-z0-9]{20,}' \
+    -e 'xox[baprs]-[A-Za-z0-9-]{10,}' \
+    -e '-----BEGIN [A-Z ]*PRIVATE KEY-----' \
+    -e '(password|passwd|senha|secret|api[_-]?key|token)[[:space:]]*[:=][[:space:]]*.[A-Za-z0-9_/+-]{16,}' \
+  )
+
+if [ -n "$achados" ]; then
+  echo ""
+  echo "  COMMIT BLOQUEADO — parece haver credencial no que você está commitando:"
+  echo ""
+  echo "$achados" | sed 's/^/    /'
+  echo ""
+  echo "  Se for mesmo um segredo: tire do arquivo, e se ele já foi para o remoto,"
+  echo "  REVOGUE a credencial — apagar do código não desfaz o vazamento."
+  echo ""
+  echo "  Se for um exemplo falso: git commit --no-verify, e explique no commit."
+  echo ""
+  exit 1
+fi
+
+exit 0
