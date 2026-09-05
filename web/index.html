@@ -987,6 +987,39 @@ function zoomIntent(event) {
   return null;
 }
 
+/// Cola no terminal a partir da área de transferência.
+///
+/// O caminho normal é o próprio navegador: ao apertar Ctrl+V com o terminal em
+/// foco, ele dispara o evento nativo e o xterm insere o texto. Este atalho é o
+/// plano B, para quando o foco não está no lugar certo — situação em que a tecla
+/// simplesmente não teria onde cair, que é como o colar "parava de funcionar".
+async function pasteInto(pane) {
+  try {
+    const texto = await navigator.clipboard.readText();
+    if (texto) pane.term.paste(texto);
+  } catch {
+    // Leitura negada acontece quando não há gesto do usuário por trás. Não é
+    // erro para alarmar: o caminho nativo continua valendo.
+    pane.term.write(
+      '\r\n\x1b[38;5;244m[não consegui ler a área de transferência — ' +
+        'tente Ctrl+Shift+V ou o botão direito]\x1b[0m\r\n',
+    );
+  }
+}
+
+/// Copia a seleção, se houver.
+///
+/// Devolve `false` quando não há nada selecionado, e aí o Ctrl+C precisa seguir
+/// para o terminal como interrupção. Trocar uma coisa pela outra quebraria a
+/// forma mais básica de parar um processo travado.
+function copySelection(pane) {
+  if (!pane.term.hasSelection()) return false;
+  const texto = pane.term.getSelection();
+  navigator.clipboard.writeText(texto).catch(() => {});
+  pane.term.clearSelection();
+  return true;
+}
+
 function ensurePane(id) {
   if (panes.has(id)) return panes.get(id);
 
@@ -1005,6 +1038,21 @@ function ensurePane(id) {
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(host);
+
+  // Clicar em qualquer ponto do painel devolve o foco ao terminal. Sem isto, um
+  // clique na borda ou na área vazia deixa o foco no documento, e a tecla de
+  // colar não tem onde cair — foi assim que o Ctrl+V "parou de funcionar".
+  host.addEventListener('mousedown', (event) => {
+    if (event.button === 0) setTimeout(() => term.focus(), 0);
+  });
+
+  // Botão direito cola, como no console do Windows. Só quando não há seleção,
+  // para não atrapalhar quem quer o menu de contexto sobre um texto marcado.
+  host.addEventListener('contextmenu', (event) => {
+    if (term.hasSelection()) return;
+    event.preventDefault();
+    pasteInto(panes.get(id) || { term });
+  });
 
   const pane = { host, term, fit, socket: null, attempts: 0, closed: false };
   panes.set(id, pane);
@@ -1042,11 +1090,41 @@ function connect(pane, id) {
   // aqui impede que o Ctrl+- vire um caractere de controle no shell.
   pane.term.attachCustomKeyEventHandler((event) => {
     if (event.type !== 'keydown') return true;
+
     const intent = zoomIntent(event);
-    if (!intent) return true;
-    event.preventDefault();
-    applyFontSize(intent === 'reset' ? 13 : fontSize + (intent === 'in' ? 1 : -1));
-    return false;
+    if (intent) {
+      event.preventDefault();
+      applyFontSize(intent === 'reset' ? 13 : fontSize + (intent === 'in' ? 1 : -1));
+      return false;
+    }
+
+    // Ctrl+C é ambíguo em terminal: com texto selecionado significa copiar, sem
+    // seleção significa interromper o processo. Tratar sempre como copiar
+    // tiraria a única forma de parar um comando travado.
+    if (event.ctrlKey && !event.altKey && !event.shiftKey && event.key === 'c') {
+      if (copySelection(pane)) {
+        event.preventDefault();
+        return false;
+      }
+      return true; // sem seleção: segue como ^C
+    }
+
+    // Ctrl+Shift+V e Shift+Insert: as duas convenções de colar em terminal.
+    if ((event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'v') ||
+        (event.shiftKey && event.key === 'Insert')) {
+      event.preventDefault();
+      pasteInto(pane);
+      return false;
+    }
+
+    // Ctrl+V: devolver `false` sem cancelar o evento deixa o navegador executar
+    // a ação padrão, que dispara o `paste` nativo — o caminho mais confiável,
+    // porque não depende de permissão de leitura da área de transferência.
+    if (event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'v') {
+      return false;
+    }
+
+    return true;
   });
 
   socket.onclose = async () => {

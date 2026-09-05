@@ -3,6 +3,23 @@
 Formato baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/),
 versionamento [SemVer](https://semver.org/lang/pt-BR/).
 
+## [1.0.0-alpha.13] — 2026-09-05
+
+### Corrigido
+
+- **`Ctrl+V` não colava.** A causa era foco: um clique na borda ou na área vazia
+  do painel deixava o foco fora do terminal, e a tecla não tinha onde cair. Agora
+  clicar em qualquer ponto do painel devolve o foco ao terminal.
+
+### Adicionado
+
+- **Colar por quatro caminhos**: `Ctrl+V`, `Ctrl+Shift+V`, `Shift+Insert` e botão
+  direito — este último só quando não há texto selecionado, para não atrapalhar o
+  menu de contexto.
+- **`Ctrl+C` copia quando há seleção** e continua interrompendo o processo quando
+  não há. Tratar sempre como copiar tiraria a forma mais básica de parar um
+  comando travado.
+
 ## [1.0.0-alpha.12] — 2026-09-04
 
 ### Adicionado
